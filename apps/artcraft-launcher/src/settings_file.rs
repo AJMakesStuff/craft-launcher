@@ -102,8 +102,9 @@ mod tests {
 
     #[test]
     fn a_portable_suite_keeps_its_settings_inside_itself() {
-        let root = PathBuf::from("E:\\Suite\\ArtCraftLauncherData");
-        assert_eq!(portable_settings(&root), PathBuf::from("E:\\Suite\\ArtCraftLauncherData\\data\\app.ron"));
+        // Built with `join` so the test reads the same on Windows and on Linux CI.
+        let root = PathBuf::from("Suite").join("ArtCraftLauncherData");
+        assert_eq!(portable_settings(&root), root.join("data").join("app.ron"));
     }
 
     #[test]
