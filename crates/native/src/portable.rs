@@ -307,25 +307,81 @@ pub fn remove(app: &CraftApp, record: &Record) -> Result<(), String> {
 /// Unpacks the launcher's own portable zip into `staging`, with the same checks as an app's, and
 /// copies it over `folder` for a self-update. `check` must accept every unpacked file before
 /// any is copied. When every file sits in one top-level folder, that folder's contents are the
-/// program.
+/// program. A copy that fails puts the previous files back. When one of them can't be put back,
+/// the previous files move to a `<staging>-recovery-<time>` folder beside `staging`, which no
+/// later update removes, and the error names it. `staging` is removed afterwards.
 pub fn unpack_over(zip: &Path, staging: &Path, folder: &Path, check: &dyn Fn(&Path) -> Result<(), String>) -> Result<(), String> {
+    let backup = staging.join("backup");
+    // A failed update whose files couldn't be moved to a recovery folder: never clear them.
+    if backup.exists() {
+        return Err(format!("the previous files of a failed update are in {}; move them out of the way first", backup.display()));
+    }
     let _ = std::fs::remove_dir_all(staging);
-    std::fs::create_dir_all(staging).map_err(|e| e.to_string())?;
-    let files = extract(zip, staging)?;
+    let mut keep = false;
+    let result = replace_with(zip, staging, folder, check, &mut keep);
+    if !keep {
+        let _ = std::fs::remove_dir_all(staging);
+    }
+    result
+}
+
+fn replace_with(zip: &Path, staging: &Path, folder: &Path, check: &dyn Fn(&Path) -> Result<(), String>, keep: &mut bool) -> Result<(), String> {
+    let unpacked = staging.join("unpacked");
+    let backup = staging.join("backup");
+    std::fs::create_dir_all(&unpacked).map_err(|e| e.to_string())?;
+    let files = extract(zip, &unpacked)?;
     for relative in &files {
-        check(&staging.join(relative))?;
+        check(&unpacked.join(relative))?;
     }
     let top = single_top_folder(&files);
-    for relative in &files {
-        let inside = match &top {
-            Some(top) => relative.strip_prefix(top).map_err(|e| e.to_string())?,
-            None => relative.as_path(),
-        };
-        let target = folder.join(inside);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let mut saved = Vec::new();
+    let mut created = Vec::new();
+    let copied = (|| {
+        for relative in &files {
+            let inside = match &top {
+                Some(top) => relative.strip_prefix(top).map_err(|e| e.to_string())?,
+                None => relative.as_path(),
+            };
+            let target = folder.join(inside);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            if target.is_file() {
+                let previous = backup.join(inside);
+                std::fs::create_dir_all(previous.parent().ok_or("no backup folder")?).map_err(|e| e.to_string())?;
+                std::fs::copy(&target, &previous).map_err(|e| e.to_string())?;
+                saved.push(inside.to_path_buf());
+            } else {
+                created.push(target.clone());
+            }
+            std::fs::copy(unpacked.join(relative), &target).map_err(|e| format!("couldn't replace {} ({e})", target.display()))?;
         }
-        std::fs::copy(staging.join(relative), &target).map_err(|e| format!("couldn't replace {} ({e})", target.display()))?;
+        Ok::<(), String>(())
+    })();
+    if let Err(error) = copied {
+        for target in &created {
+            let _ = std::fs::remove_file(target);
+        }
+        for inside in &saved {
+            if let Err(restore) = std::fs::copy(backup.join(inside), folder.join(inside)) {
+                let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+                let mut recovery = staging.as_os_str().to_owned();
+                recovery.push(format!("-recovery-{stamp}"));
+                let recovery = PathBuf::from(recovery);
+                let kept = if std::fs::rename(&backup, &recovery).is_ok() {
+                    recovery
+                } else {
+                    *keep = true;
+                    backup.clone()
+                };
+                return Err(format!(
+                    "{error}; couldn't put back {} ({restore}). The previous files are in {}",
+                    folder.join(inside).display(),
+                    kept.display()
+                ));
+            }
+        }
+        return Err(error);
     }
     Ok(())
 }
@@ -346,6 +402,22 @@ fn single_top_folder(files: &[PathBuf]) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// Previous files left in the staging folder by a failed update are never cleared by the next one.
+    #[test]
+    fn a_self_update_keeps_the_previous_files_of_a_failed_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("launcher-update");
+        std::fs::create_dir_all(staging.join("backup")).unwrap();
+        std::fs::write(staging.join("backup").join("artcraft-launcher.exe"), "0.1.0").unwrap();
+        let zip = archive(dir.path(), "update.zip", &[("artcraft-launcher.exe", b"0.2.0")]);
+        let folder = dir.path().join("ArtCraft Launcher");
+        std::fs::create_dir_all(&folder).unwrap();
+        let error = unpack_over(&zip, &staging, &folder, &|_| Ok(())).unwrap_err();
+        assert!(error.contains("previous files"), "{error}");
+        assert_eq!(std::fs::read_to_string(staging.join("backup").join("artcraft-launcher.exe")).unwrap(), "0.1.0");
+        assert!(!folder.join("artcraft-launcher.exe").exists());
+    }
 
     fn archive(root: &Path, name: &str, files: &[(&str, &[u8])]) -> PathBuf {
         let path = root.join(name);

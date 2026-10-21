@@ -593,8 +593,8 @@ fn run_step(reference: &Path, pid: u32, exe: &Path, step: &Finish, wait: std::ti
         Finish::Msi(msi) => {
             let _ = std::fs::remove_file(msi);
         }
-        Finish::Portable { zip, tmp } => {
-            let _ = std::fs::remove_dir_all(tmp);
+        // `unpack_over` removes the staging folder, unless it holds files it couldn't put back.
+        Finish::Portable { zip, .. } => {
             let _ = std::fs::remove_file(zip);
         }
     }
@@ -869,6 +869,38 @@ mod tests {
         assert!(error.contains("isn't signed"), "{error}");
         assert_eq!(std::fs::read_to_string(&exe).unwrap(), "0.1.0");
         assert!(!folder.join("README.md").exists() && !folder.join("notes.txt").exists(), "nothing is copied");
+        assert!(!zip.exists() && !tmp.exists());
+    }
+
+    /// A copy that fails part way through puts the previous files back and removes the new ones,
+    /// so the launcher that starts again is the old one, whole.
+    #[cfg(windows)]
+    #[test]
+    fn a_portable_update_that_fails_part_way_puts_the_old_files_back() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("ArtCraft Launcher");
+        // A folder where the zip has a file: copying it there fails after the exe was replaced.
+        std::fs::create_dir_all(folder.join("NOTICE")).unwrap();
+        let exe = folder.join("artcraft-launcher.exe");
+        std::fs::write(&exe, "0.1.0").unwrap();
+        let zip = dir.path().join("artcraft-launcher-0.2.0-windows-x64-portable.zip");
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(&zip).unwrap());
+        for (name, body) in [
+            ("artcraft-launcher-0.2.0-windows-x64-portable/artcraft-launcher.exe", "0.2.0"),
+            ("artcraft-launcher-0.2.0-windows-x64-portable/README.md", "# ArtCraft Launcher"),
+            ("artcraft-launcher-0.2.0-windows-x64-portable/NOTICE", "notice"),
+        ] {
+            writer.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            writer.write_all(body.as_bytes()).unwrap();
+        }
+        writer.finish().unwrap();
+        let tmp = dir.path().join("cache").join(PORTABLE_STAGING);
+        let step = Finish::Portable { zip: zip.clone(), tmp: tmp.clone() };
+        let error = run_step(&system_program("cmd.exe"), exited_pid(), &exe, &step, std::time::Duration::from_secs(5)).unwrap_err();
+        assert!(error.contains("NOTICE"), "{error}");
+        assert_eq!(std::fs::read_to_string(&exe).unwrap(), "0.1.0", "the previous exe is put back");
+        assert!(!folder.join("README.md").exists(), "a file the update added is removed");
         assert!(!zip.exists() && !tmp.exists());
     }
 
