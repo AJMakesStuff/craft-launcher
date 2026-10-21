@@ -61,11 +61,28 @@ fn is_hex64(s: &str) -> bool {
 }
 
 /// Whether `url` is safe to hand to the system browser from untrusted text (release notes):
-/// `https` only, a host, no user-info, no spaces or control characters.
+/// `https` only, a host, no user-info, no spaces or control characters, and no shell metacharacters.
+///
+/// The system opener is not always a direct `open`: the pinned `webbrowser` crate's WSL fallback
+/// passes the URL to `cmd.exe /c start` while escaping only `^` and `&`, so a character like `|`
+/// in an otherwise valid URL becomes a command separator (CWE-78). Because a legitimate
+/// `https://` web link never needs these characters unescaped, we refuse any URL that contains a
+/// shell/cmd metacharacter rather than rely on the opener to neutralise it.
 pub fn safe_web_link(url: &str) -> bool {
     let Some(rest) = url.strip_prefix("https://") else { return false };
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    url.len() <= 2000 && !authority.is_empty() && !authority.contains(['@', '\\']) && !url.chars().any(|c| c.is_control() || c.is_whitespace())
+    url.len() <= 2000
+        && !authority.is_empty()
+        && !authority.contains(['@', '\\'])
+        && !url.chars().any(|c| c.is_control() || c.is_whitespace())
+        && !url.chars().any(is_shell_meta)
+}
+
+/// Characters a command interpreter (POSIX shells or `cmd.exe`) may treat specially. A real
+/// `https` URL never needs any of them unescaped in a browser-opened link. `%` matters because
+/// `cmd.exe` expands `%NAME%` references, and an expanded value could itself carry metacharacters.
+pub fn is_shell_meta(c: char) -> bool {
+    matches!(c, '|' | '&' | ';' | '<' | '>' | '(' | ')' | '$' | '`' | '"' | '\'' | '^' | '!' | '*' | '%' | '{' | '}' | '[' | ']')
 }
 
 /// The prefix every download of `repo` must start with.
@@ -216,6 +233,16 @@ mod tests {
             "https://example.com/a b",
             "https://example.com/\nx",
             "https:///path",
+            // Shell/cmd metacharacters: the WSL opener fallback shells out, so these must be
+            // refused even inside an otherwise valid https URL (CWE-78).
+            "https://example.com/a|calc",
+            "https://example.com/p?x=1&y=2",
+            "https://example.com/`id`",
+            "https://example.com/$(whoami)",
+            "https://example.com/a;b",
+            "https://example.com/a>b",
+            "https://example.com/%COMSPEC%",
+            "https://example.com/%PATH%",
         ] {
             assert!(!safe_web_link(bad), "{bad:?}");
         }
