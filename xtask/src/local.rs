@@ -685,6 +685,8 @@ mod tests {
     fn dates_and_versions() {
         assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
         assert_eq!(rfc3339(1_791_500_000), "2026-10-08T22:53:20Z");
+        // A time past jiff's calendar range reads as the epoch date instead of panicking.
+        assert!(rfc3339(i64::MAX).starts_with("1970-01-01T"));
         assert_eq!(compare_versions("0.10.0", "0.9.0"), std::cmp::Ordering::Greater);
         assert_eq!(compare_versions("1.0.0", "1.0.0-rc.1"), std::cmp::Ordering::Greater);
         assert!(parse_version("1.2").is_none() && parse_version(".building-1.2.3").is_none());

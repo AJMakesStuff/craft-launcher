@@ -155,6 +155,9 @@ mod tests {
     fn shows_dates_people_read() {
         assert_eq!(format_date(1_791_471_170), "Oct 8, 2026");
         assert_eq!(civil_from_unix(951_782_400), (2000, 2, 29));
+        // A time past jiff's calendar range reads as the epoch instead of panicking.
+        assert_eq!(civil_from_unix(i64::MAX), (1970, 1, 1));
+        assert_eq!(civil_from_unix(i64::MIN), (1970, 1, 1));
         let now = 1_791_471_170;
         assert_eq!(format_ago(now - 5, now), "just now");
         assert_eq!(format_ago(now - 600, now), "10 min ago");
