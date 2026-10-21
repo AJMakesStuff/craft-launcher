@@ -116,8 +116,9 @@ only; English where there is none): never bundle a CJK font, they are 10 MB and 
 6. **Time goes through `jiff`** (workspace dependency). Never hand-roll UTC/calendar conversion
    (days-to-date algorithms, leap-year math); a module owns only its output format string. The one
    exception is range extension: past the years jiff can represent, shift the date by whole 400-year
-   Gregorian cycles (146,097 days, after which the calendar repeats), let jiff compute the month,
-   day and time, and add the cycles back to the year.
+   Gregorian cycles (146,097 days, after which the calendar repeats), let jiff compute the month and
+   day, and add the cycles back to the year (splitting seconds into hours, minutes and seconds is
+   plain arithmetic).
 
 ## 3. Before you finish a task
 
