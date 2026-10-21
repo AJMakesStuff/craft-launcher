@@ -1,4 +1,5 @@
-//! Just enough calendar to read GitHub's timestamps and show them, without a date crate.
+//! Just enough calendar to read GitHub's timestamps and show them (the conversion goes through
+//! jiff; this module owns only the parsing and the output format strings).
 //!
 //! # Internationalisation
 //! [`format_ago`] and [`format_date`] are English-only fallbacks. Translatable UI must use
@@ -64,32 +65,25 @@ pub fn parse_rfc3339(text: &str) -> Option<i64> {
         }
         _ => return None,
     };
-    Some(days_from_civil(y, mo, d) * 86_400 + h * 3600 + mi * 60 + s - offset)
+    Some(days_from_civil(y, mo, d)? * 86_400 + h * 3600 + mi * 60 + s - offset)
 }
 
-/// Days since 1970-01-01 (Howard Hinnant's algorithm).
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = (m + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
+/// Days since 1970-01-01 (through jiff's civil calendar). A day past the month's length rolls over
+/// the way the old Hinnant arithmetic did (e.g. `2026-02-30` → `2026-03-02`). `None` for a year
+/// outside jiff's range.
+fn days_from_civil(y: i64, m: i64, d: i64) -> Option<i64> {
+    let first = jiff::civil::Date::new(i16::try_from(y).ok()?, i8::try_from(m).ok()?, 1).ok()?;
+    let date = first.checked_add(jiff::SignedDuration::from_hours(d.checked_sub(1)?.checked_mul(24)?)).ok()?;
+    Some(date.duration_since(jiff::civil::Date::constant(1970, 1, 1)).as_secs() / 86_400)
 }
 
-/// (year, month, day) for a Unix time.
+/// (year, month, day) for a Unix time (UTC). A time outside jiff's calendar range reads as the
+/// epoch rather than panicking.
 pub fn civil_from_unix(secs: i64) -> (i64, u32, u32) {
-    let z = secs.div_euclid(86_400) + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    (y, u32::try_from(m).unwrap_or(1), u32::try_from(d).unwrap_or(1))
+    let epoch = jiff::civil::Date::constant(1970, 1, 1);
+    let whole_days = jiff::SignedDuration::from_secs(secs.div_euclid(86_400).saturating_mul(86_400));
+    let date = epoch.checked_add(whole_days).unwrap_or(epoch);
+    (i64::from(date.year()), u32::try_from(date.month()).unwrap_or(1), u32::try_from(date.day()).unwrap_or(1))
 }
 
 const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];

@@ -113,6 +113,8 @@ only; English where there is none): never bundle a CJK font, they are 10 MB and 
    GitHub release JSON fixtures (small, committed under `crates/core/tests/fixtures/`).
 5. When fetching anything, use a generic `ArtCraft-Launcher/<version>` User-Agent and never put
    a person's name, email or other personal details in requests.
+6. **Time goes through `jiff`** (workspace dependency). Never hand-roll UTC/calendar conversion
+   (days-to-date algorithms, leap-year math); a module owns only its output format string.
 
 ## 3. Before you finish a task
 
