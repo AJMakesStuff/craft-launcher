@@ -114,7 +114,10 @@ only; English where there is none): never bundle a CJK font, they are 10 MB and 
 5. When fetching anything, use a generic `ArtCraft-Launcher/<version>` User-Agent and never put
    a person's name, email or other personal details in requests.
 6. **Time goes through `jiff`** (workspace dependency). Never hand-roll UTC/calendar conversion
-   (days-to-date algorithms, leap-year math); a module owns only its output format string.
+   (days-to-date algorithms, leap-year math); a module owns only its output format string. The one
+   exception is range extension: past the years jiff can represent, shift the date by whole 400-year
+   Gregorian cycles (146,097 days, after which the calendar repeats), let jiff compute the month,
+   day and time, and add the cycles back to the year.
 
 ## 3. Before you finish a task
 
