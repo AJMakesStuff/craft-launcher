@@ -233,53 +233,64 @@ pub fn update(
     // The restart ends this process: nothing else may be under way.
     last()?;
     phase(JobPhase::Installing);
-    if let Err(e) = crate::paths::write_atomic(&marker(paths), format!("{}\n{}\n", release.tag, crate::now()).as_bytes()) {
+    let pid = std::process::id();
+    let scheduled = (|| -> Result<(), String> {
+        match install {
+            #[cfg(target_os = "macos")]
+            Install::MacApp(bundle) => {
+                let existing = Installed { version: None, source: InstallSource::MacApp, location: bundle.display().to_string(), package: None };
+                let placed =
+                    install::macos::install_dmg(&LAUNCHER, &file, Some(&existing), None, false, paths, &install::macos::Expect::release(release));
+                let _ = std::fs::remove_file(&file);
+                let placed = placed?;
+                relaunch_after_exit(pid, &[Path::new("/usr/bin/open").as_os_str(), placed.as_os_str()])
+            }
+            #[cfg(target_os = "linux")]
+            Install::AppImage(path) => {
+                replace_appimage(&file, path)?;
+                let _ = std::fs::remove_file(&file);
+                relaunch_after_exit(pid, &[path.as_os_str()])
+            }
+            #[cfg(target_os = "linux")]
+            Install::Package(kind, exe) => {
+                let result = install::linux::install_package(*kind, &file, stop, phase);
+                let _ = std::fs::remove_file(&file);
+                result?;
+                relaunch_after_exit(pid, &[exe.as_os_str()])
+            }
+            #[cfg(target_os = "linux")]
+            Install::Flatpak => {
+                let result = install::linux::install_package(PackageKind::Flatpak, &file, stop, phase);
+                let _ = std::fs::remove_file(&file);
+                result?;
+                relaunch_flatpak_after_exit()
+            }
+            #[cfg(windows)]
+            Install::Msi(exe) => windows_helper(paths, pid, exe, &msi_finish(&file)?),
+            #[cfg(windows)]
+            Install::Portable(exe) => {
+                exe.parent().ok_or("the launcher isn't in a folder")?;
+                windows_helper(paths, pid, exe, &Finish::Portable { zip: file, tmp: paths.cache.join(PORTABLE_STAGING) })
+            }
+            #[allow(unreachable_patterns)]
+            _ => {
+                let _ = (pid, &file);
+                Err("this copy of ArtCraft Launcher can't update itself; download the new version instead".into())
+            }
+        }
+    })();
+    mark_if_scheduled(paths, release, scheduled)
+}
+
+/// Records `release` as just installed once its swap is scheduled, so that a swap that couldn't
+/// start leaves the update on offer instead of hiding it for [`JUST_UPDATED_FOR`].
+fn mark_if_scheduled(paths: &Paths, release: &Release, scheduled: Result<(), String>) -> Result<(), String> {
+    if scheduled.is_ok()
+        && let Err(e) = crate::paths::write_atomic(&marker(paths), format!("{}\n{}\n", release.tag, crate::now()).as_bytes())
+    {
         log::warn!("couldn't record the self-update: {e}");
     }
-    let pid = std::process::id();
-    match install {
-        #[cfg(target_os = "macos")]
-        Install::MacApp(bundle) => {
-            let existing = Installed { version: None, source: InstallSource::MacApp, location: bundle.display().to_string(), package: None };
-            let placed =
-                install::macos::install_dmg(&LAUNCHER, &file, Some(&existing), None, false, paths, &install::macos::Expect::release(release));
-            let _ = std::fs::remove_file(&file);
-            let placed = placed?;
-            relaunch_after_exit(pid, &[Path::new("/usr/bin/open").as_os_str(), placed.as_os_str()])
-        }
-        #[cfg(target_os = "linux")]
-        Install::AppImage(path) => {
-            replace_appimage(&file, path)?;
-            let _ = std::fs::remove_file(&file);
-            relaunch_after_exit(pid, &[path.as_os_str()])
-        }
-        #[cfg(target_os = "linux")]
-        Install::Package(kind, exe) => {
-            let result = install::linux::install_package(*kind, &file, stop, phase);
-            let _ = std::fs::remove_file(&file);
-            result?;
-            relaunch_after_exit(pid, &[exe.as_os_str()])
-        }
-        #[cfg(target_os = "linux")]
-        Install::Flatpak => {
-            let result = install::linux::install_package(PackageKind::Flatpak, &file, stop, phase);
-            let _ = std::fs::remove_file(&file);
-            result?;
-            relaunch_flatpak_after_exit()
-        }
-        #[cfg(windows)]
-        Install::Msi(exe) => windows_helper(paths, pid, exe, &msi_finish(&file)?),
-        #[cfg(windows)]
-        Install::Portable(exe) => {
-            exe.parent().ok_or("the launcher isn't in a folder")?;
-            windows_helper(paths, pid, exe, &Finish::Portable { zip: file, tmp: paths.cache.join(PORTABLE_STAGING) })
-        }
-        #[allow(unreachable_patterns)]
-        _ => {
-            let _ = (pid, &file);
-            Err("this copy of ArtCraft Launcher can't update itself; download the new version instead".into())
-        }
-    }
+    scheduled
 }
 
 /// Copies the new AppImage beside the running one and renames it over it. The running copy is
@@ -753,6 +764,19 @@ mod tests {
         let paths = launcher_paths(&exe).unwrap();
         assert_eq!(paths.cache, dir.path().join("ArtCraftLauncherData").join("cache"));
         assert_eq!(paths.data, dir.path().join("ArtCraftLauncherData").join("data"));
+    }
+
+    /// An update whose swap couldn't be scheduled stays on offer; a scheduled one is not offered again.
+    #[test]
+    fn only_a_scheduled_update_is_recorded_as_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        std::fs::create_dir_all(&paths.data).unwrap();
+        let release = Release { tag: "v0.2.0".into(), ..Release::default() };
+        assert!(mark_if_scheduled(&paths, &release, Err("couldn't schedule the update".into())).is_err());
+        assert!(!just_updated_to(&paths, &release));
+        assert!(mark_if_scheduled(&paths, &release, Ok(())).is_ok());
+        assert!(just_updated_to(&paths, &release));
     }
 
     /// A failed update is offered again and its error is logged at the next start, once.
