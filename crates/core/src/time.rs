@@ -77,13 +77,23 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> Option<i64> {
     Some(date.duration_since(jiff::civil::Date::constant(1970, 1, 1)).as_secs() / 86_400)
 }
 
-/// (year, month, day) for a Unix time (UTC). A time outside jiff's calendar range reads as the
-/// epoch rather than panicking.
+/// (year, month, day) for a Unix time (UTC). jiff's civil calendar only spans years -9999..=9999,
+/// far narrower than the whole `i64` the old hand-rolled Hinnant code converted, so the instant is
+/// first moved into range by whole 400-year Gregorian cycles (the calendar repeats every 400 years
+/// = 146_097 days) and the real year restored afterwards. jiff still does the month/day; the cycle
+/// count only shifts the year, keeping every `i64` exact (e.g. `i64::MAX` → year 292277026596,
+/// `i64::MIN` → year -292277022657), with no epoch fallback for a value the old code converted.
 pub fn civil_from_unix(secs: i64) -> (i64, u32, u32) {
     let epoch = jiff::civil::Date::constant(1970, 1, 1);
-    let whole_days = jiff::SignedDuration::from_secs(secs.div_euclid(86_400).saturating_mul(86_400));
-    let date = epoch.checked_add(whole_days).unwrap_or(epoch);
-    (i64::from(date.year()), u32::try_from(date.month()).unwrap_or(1), u32::try_from(date.day()).unwrap_or(1))
+    let days = secs.div_euclid(86_400);
+    let (cycles, rest) = (days.div_euclid(146_097), days.rem_euclid(146_097));
+    // `rest` is in `0..146_097` (under one 400-year cycle), so `epoch + rest days` always lands in
+    // 1970..=2369 — comfortably inside jiff's range — and `rest * 86_400` never overflows.
+    let date = epoch.checked_add(jiff::SignedDuration::from_secs(rest * 86_400)).unwrap_or(epoch);
+    // Restore the real year through `i128` so `cycles * 400` can't overflow at the `i64` extremes.
+    let y = i128::from(date.year()) + i128::from(cycles) * 400;
+    let year = i64::try_from(y).unwrap_or(if y < 0 { i64::MIN } else { i64::MAX });
+    (year, u32::try_from(date.month()).unwrap_or(1), u32::try_from(date.day()).unwrap_or(1))
 }
 
 const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -155,9 +165,14 @@ mod tests {
     fn shows_dates_people_read() {
         assert_eq!(format_date(1_791_471_170), "Oct 8, 2026");
         assert_eq!(civil_from_unix(951_782_400), (2000, 2, 29));
-        // A time past jiff's calendar range reads as the epoch instead of panicking.
-        assert_eq!(civil_from_unix(i64::MAX), (1970, 1, 1));
-        assert_eq!(civil_from_unix(i64::MIN), (1970, 1, 1));
+        // Year 10000 is past jiff's own calendar range, but the 400-year cycle reduction keeps the
+        // old conversion (jiff spans only -9999..=9999).
+        assert_eq!(civil_from_unix(253_402_300_800), (10000, 1, 1));
+        // The `i64` extremes stay the dates the old Hinnant code produced, not the epoch.
+        assert_eq!(civil_from_unix(i64::MAX), (292_277_026_596, 12, 4));
+        assert_eq!(civil_from_unix(i64::MIN), (-292_277_022_657, 1, 27));
+        assert_eq!(format_date(i64::MAX), "Dec 4, 292277026596");
+        assert_eq!(format_date(i64::MIN), "Jan 27, -292277022657");
         let now = 1_791_471_170;
         assert_eq!(format_ago(now - 5, now), "just now");
         assert_eq!(format_ago(now - 600, now), "10 min ago");
