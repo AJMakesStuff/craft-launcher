@@ -189,8 +189,18 @@ pub mod windows {
     pub fn executable_version(path: &std::path::Path) -> Option<artcraft_launcher_core::version::Version> {
         let path = dunce::canonicalize(path).ok()?;
         let info = winsafe::HVERSIONINFO::GetFileVersionInfo(path.to_str()?).ok()?;
-        let product = info.langs_and_cps().ok()?.iter().find_map(|&lang| info.str_val(lang, "ProductVersion").ok())?;
+        let listed = info.langs_and_cps().map(<[_]>::to_vec).unwrap_or_default();
+        let product = string_tables(&listed).into_iter().find_map(|table| info.str_val(table, "ProductVersion").ok())?;
         version::parse(product.trim())
+    }
+
+    /// The string tables to look in: the languages the file lists, then U.S. English in UTF-16,
+    /// Windows-1252 and no code page, as .NET's `FileVersionInfo` also tries when a file lists none
+    /// or its listed one has no strings.
+    pub(crate) fn string_tables(listed: &[(winsafe::LANGID, winsafe::co::CP)]) -> Vec<(winsafe::LANGID, winsafe::co::CP)> {
+        use winsafe::{LANGID, co};
+        let us = LANGID::new(co::LANG::ENGLISH, co::SUBLANG::ENGLISH_US);
+        listed.iter().copied().chain([(us, co::CP::UTF16), (us, co::CP::WINDOWS_1252), (us, co::CP::ACP)]).collect()
     }
 
     /// An MSI install found in the registry.
@@ -515,6 +525,19 @@ mod tests {
         std::fs::write(&text, "not a program").unwrap();
         assert_eq!(windows::executable_version(&text), None);
         assert_eq!(windows::executable_version(&dir.path().join("missing.exe")), None);
+    }
+
+    /// Without a listed language, the version is still looked for in the string tables .NET's
+    /// `FileVersionInfo` falls back to (040904B0, 040904E4, 04090000), after any listed one.
+    #[cfg(windows)]
+    #[test]
+    fn the_version_is_looked_for_in_the_usual_string_tables_too() {
+        use winsafe::{LANGID, co};
+        let key = |(lang, cp): (LANGID, co::CP)| format!("{:04x}{:04x}", u16::from(lang), u16::from(cp));
+        let keys = |listed: &[(LANGID, co::CP)]| windows::string_tables(listed).into_iter().map(key).collect::<Vec<_>>();
+        assert_eq!(keys(&[]), ["040904b0", "040904e4", "04090000"]);
+        let german = (LANGID::new(co::LANG::GERMAN, co::SUBLANG::GERMAN), co::CP::UTF16);
+        assert_eq!(keys(&[german]), ["040704b0", "040904b0", "040904e4", "04090000"]);
     }
 
     #[test]
