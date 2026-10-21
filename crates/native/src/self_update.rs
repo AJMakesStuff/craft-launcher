@@ -233,6 +233,9 @@ pub fn update(
     // The restart ends this process: nothing else may be under way.
     last()?;
     phase(JobPhase::Installing);
+    // Written before the swap starts: the Windows helper runs alongside this process and clears
+    // it when it fails, which a write after scheduling could undo.
+    mark_installed(paths, release);
     let pid = std::process::id();
     let scheduled = (|| -> Result<(), String> {
         match install {
@@ -279,16 +282,21 @@ pub fn update(
             }
         }
     })();
-    mark_if_scheduled(paths, release, scheduled)
+    unmark_unless_scheduled(paths, scheduled)
 }
 
-/// Records `release` as just installed once its swap is scheduled, so that a swap that couldn't
-/// start leaves the update on offer instead of hiding it for [`JUST_UPDATED_FOR`].
-fn mark_if_scheduled(paths: &Paths, release: &Release, scheduled: Result<(), String>) -> Result<(), String> {
-    if scheduled.is_ok()
-        && let Err(e) = crate::paths::write_atomic(&marker(paths), format!("{}\n{}\n", release.tag, crate::now()).as_bytes())
-    {
+/// Records `release` as just installed, so it isn't offered again for [`JUST_UPDATED_FOR`].
+fn mark_installed(paths: &Paths, release: &Release) {
+    if let Err(e) = crate::paths::write_atomic(&marker(paths), format!("{}\n{}\n", release.tag, crate::now()).as_bytes()) {
         log::warn!("couldn't record the self-update: {e}");
+    }
+}
+
+/// Removes the record of [`mark_installed`] when the swap couldn't be scheduled, so the update
+/// stays on offer.
+fn unmark_unless_scheduled(paths: &Paths, scheduled: Result<(), String>) -> Result<(), String> {
+    if scheduled.is_err() {
+        let _ = std::fs::remove_file(marker(paths));
     }
     scheduled
 }
@@ -766,17 +774,25 @@ mod tests {
         assert_eq!(paths.data, dir.path().join("ArtCraftLauncherData").join("data"));
     }
 
-    /// An update whose swap couldn't be scheduled stays on offer; a scheduled one is not offered again.
+    /// An update whose swap couldn't be scheduled stays on offer, and a scheduled one is not
+    /// offered again unless the helper, running alongside, records that it failed.
     #[test]
     fn only_a_scheduled_update_is_recorded_as_installed() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::under(dir.path());
         std::fs::create_dir_all(&paths.data).unwrap();
         let release = Release { tag: "v0.2.0".into(), ..Release::default() };
-        assert!(mark_if_scheduled(&paths, &release, Err("couldn't schedule the update".into())).is_err());
+        mark_installed(&paths, &release);
+        assert!(unmark_unless_scheduled(&paths, Err("couldn't schedule the update".into())).is_err());
         assert!(!just_updated_to(&paths, &release));
-        assert!(mark_if_scheduled(&paths, &release, Ok(())).is_ok());
+        mark_installed(&paths, &release);
+        assert!(unmark_unless_scheduled(&paths, Ok(())).is_ok());
         assert!(just_updated_to(&paths, &release));
+        // The helper refuses before this process has finished scheduling it.
+        mark_installed(&paths, &release);
+        record_failure(&paths, "the update helper only finishes ArtCraft Launcher's own update");
+        assert!(unmark_unless_scheduled(&paths, Ok(())).is_ok());
+        assert!(!just_updated_to(&paths, &release), "a failure the helper recorded must stay recorded");
     }
 
     /// A failed update is offered again and its error is logged at the next start, once.
