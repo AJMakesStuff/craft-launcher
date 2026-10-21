@@ -184,17 +184,13 @@ pub mod windows {
 
     const UNINSTALL: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";
 
-    /// Reads VERSIONINFO without executing the downloaded application. The path is data in
-    /// a child-only environment variable, never interpolated into PowerShell source.
+    /// Reads the ProductVersion string from a program's VERSIONINFO, in the first language that
+    /// has one, without running the program or any other process.
     pub fn executable_version(path: &std::path::Path) -> Option<artcraft_launcher_core::version::Version> {
-        let path = std::fs::canonicalize(path).ok()?;
-        let mut command = crate::process::command("powershell.exe");
-        command.args([
-            "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; [System.Diagnostics.FileVersionInfo]::GetVersionInfo($env:ARTCRAFT_VERSION_FILE).ProductVersion",
-        ]).env("ARTCRAFT_VERSION_FILE", path);
-        let output = crate::process::run_command(command, "powershell.exe", std::time::Duration::from_secs(5)).ok()?;
-        version::parse(output.trim())
+        let path = dunce::canonicalize(path).ok()?;
+        let info = winsafe::HVERSIONINFO::GetFileVersionInfo(path.to_str()?).ok()?;
+        let product = info.langs_and_cps().ok()?.iter().find_map(|&lang| info.str_val(lang, "ProductVersion").ok())?;
+        version::parse(product.trim())
     }
 
     /// An MSI install found in the registry.
@@ -509,6 +505,17 @@ mod tests {
     use artcraft_launcher_core::SUITE;
 
     use super::*;
+
+    /// A file without VERSIONINFO, or one that isn't there, has no version.
+    #[cfg(windows)]
+    #[test]
+    fn a_file_without_version_info_has_no_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = dir.path().join("photocraft.exe");
+        std::fs::write(&text, "not a program").unwrap();
+        assert_eq!(windows::executable_version(&text), None);
+        assert_eq!(windows::executable_version(&dir.path().join("missing.exe")), None);
+    }
 
     #[test]
     fn recognises_appimage_names_conservatively() {
