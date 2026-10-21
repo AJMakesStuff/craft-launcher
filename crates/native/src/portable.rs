@@ -304,6 +304,44 @@ pub fn remove(app: &CraftApp, record: &Record) -> Result<(), String> {
     Ok(())
 }
 
+/// Unpacks the launcher's own portable zip into `staging`, with the same checks as an app's, and
+/// copies it over `folder` for a self-update. `check` must accept every unpacked file before
+/// any is copied. When every file sits in one top-level folder, that folder's contents are the
+/// program.
+pub fn unpack_over(zip: &Path, staging: &Path, folder: &Path, check: &dyn Fn(&Path) -> Result<(), String>) -> Result<(), String> {
+    let _ = std::fs::remove_dir_all(staging);
+    std::fs::create_dir_all(staging).map_err(|e| e.to_string())?;
+    let files = extract(zip, staging)?;
+    for relative in &files {
+        check(&staging.join(relative))?;
+    }
+    let top = single_top_folder(&files);
+    for relative in &files {
+        let inside = match &top {
+            Some(top) => relative.strip_prefix(top).map_err(|e| e.to_string())?,
+            None => relative.as_path(),
+        };
+        let target = folder.join(inside);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::copy(staging.join(relative), &target).map_err(|e| format!("couldn't replace {} ({e})", target.display()))?;
+    }
+    Ok(())
+}
+
+/// The one folder that holds every file, when there is one.
+fn single_top_folder(files: &[PathBuf]) -> Option<PathBuf> {
+    let first = files.first()?.components().next()?;
+    files
+        .iter()
+        .all(|file| {
+            let mut parts = file.components();
+            parts.next() == Some(first) && parts.next().is_some()
+        })
+        .then(|| PathBuf::from(first.as_os_str()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
