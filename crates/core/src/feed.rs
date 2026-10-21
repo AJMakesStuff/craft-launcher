@@ -186,13 +186,12 @@ impl FeedRelease {
     /// when it doesn't hold up (no tag, or not a version).
     fn to_release(&self, repo: &str, mirror: Option<&str>) -> Option<Release> {
         let version = version::parse(&self.tag)?;
-        let prefix = release::download_prefix(repo);
-        let allowed = |url: &str| url.starts_with(&prefix) || mirror.is_some_and(|m| url.starts_with(m) && !url.contains(".."));
+        let allowed = |url: &str| release::download_url_under(url, &release::download_prefix(repo)) || mirror.is_some_and(|m| release::download_url_under_mirror(url, m));
         let releases_page = format!("https://github.com/{repo}/releases/");
         let assets = self
             .assets
             .iter()
-            .filter(|(name, _, url, _)| release::valid_file_name(name) && allowed(url) && !url.contains(['?', '#', '\\']))
+            .filter(|(name, _, url, _)| release::valid_file_name(name) && allowed(url))
             .map(|(name, size, url, sha)| Asset {
                 name: name.clone(),
                 size: *size,
@@ -562,6 +561,18 @@ mod tests {
         assert!(feed.repo_renames.is_empty(), "{:?}", feed.repo_renames);
         assert_eq!(feed.repo_for(app("photocraft")), "storytold/photocraft");
         assert_eq!(feed.answer(app("photocraft"), NOW), FeedAnswer::AskGitHub);
+    }
+
+    #[test]
+    fn a_feed_url_cannot_traverse_out_of_the_repository() {
+        // The feed advertises a legitimate tag but points the asset at another repository by
+        // climbing out with `../` after the approved prefix (CWE-180).
+        let escaped = sample().replace(
+            "https://github.com/storytold/photocraft/releases/download/v0.6.0/photocraft-0.6.0-macos-universal.dmg",
+            "https://github.com/storytold/photocraft/releases/download/../../../../attacker/repo/releases/download/v99/photocraft-0.6.0-macos-universal.dmg",
+        );
+        let FeedAnswer::Fresh(Some(r)) = Feed::parse(&escaped).unwrap().answer(app("photocraft"), NOW) else { panic!() };
+        assert!(r.assets.is_empty(), "the traversing download must be rejected");
     }
 
     #[test]
