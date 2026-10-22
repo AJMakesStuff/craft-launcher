@@ -229,7 +229,7 @@ pub fn update(
     let mut job = Job { http, paths, stop, phase, install_locations: &Default::default(), replace: false };
     let file = install::download(release, &asset, &mut job)?;
     #[cfg(windows)]
-    windows_precheck(install, &file)?;
+    windows_precheck(install, paths, &file)?;
     // The restart ends this process: nothing else may be under way.
     last()?;
     phase(JobPhase::Installing);
@@ -536,14 +536,29 @@ pub fn take_failure(paths: &Paths) -> Option<String> {
 }
 
 /// Checks, while the launcher still runs and can show the error, what the helper checks before
-/// it installs: this program, the installed exe and the new MSI are signed by one publisher.
+/// it installs: this program, the installed exe and the new MSI are signed by one publisher, and
+/// the helper finds the cache in `paths` that holds its copy, the download and the staging folder.
 #[cfg(windows)]
-fn windows_precheck(install: &Install, download: &Path) -> Result<(), String> {
+fn windows_precheck(install: &Install, paths: &Paths, download: &Path) -> Result<(), String> {
     let me = std::env::current_exe().map_err(|e| format!("couldn't find this program ({e})"))?;
     match install {
-        Install::Msi(exe) => signed_like(&me, exe).and_then(|()| signed_like(&me, download)),
-        Install::Portable(exe) => signed_like(&me, exe),
+        Install::Msi(exe) => signed_like(&me, exe).and_then(|()| signed_like(&me, download)).and_then(|()| same_cache_as_helper(paths, exe)),
+        Install::Portable(exe) => signed_like(&me, exe).and_then(|()| same_cache_as_helper(paths, exe)),
         _ => Ok(()),
+    }
+}
+
+/// Accepts `paths` when the update helper, which finds the launcher's folders again from `exe`
+/// ([`launcher_paths`]), finds the same cache. Refuses a launcher that keeps its files in the
+/// temporary folder because its own folders couldn't be found.
+#[cfg(windows)]
+fn same_cache_as_helper(paths: &Paths, exe: &Path) -> Result<(), String> {
+    let canonical = |p: &Path| p.canonicalize().ok();
+    let theirs = launcher_paths(exe).ok().and_then(|helper| canonical(&helper.cache));
+    if theirs.is_some() && theirs == canonical(&paths.cache) {
+        Ok(())
+    } else {
+        Err(format!("ArtCraft Launcher can't update itself while it keeps its files in {}; download the new version instead", paths.cache.display()))
     }
 }
 
@@ -779,6 +794,29 @@ mod tests {
         assert_eq!(paths.data, dir.path().join("ArtCraftLauncherData").join("data"));
     }
 
+    /// The launcher quits for an update only when the helper finds the cache the update was
+    /// downloaded into. One that keeps its files in the temporary folder, because its own folders
+    /// couldn't be found, refuses before it quits: the helper would look in the per-user folders.
+    #[cfg(windows)]
+    #[test]
+    fn a_launcher_whose_helper_looks_in_other_folders_does_not_quit_for_an_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("ArtCraft Launcher");
+        std::fs::create_dir_all(&folder).unwrap();
+        let exe = folder.join("artcraft-launcher.exe");
+        std::fs::write(&exe, "0.1.0").unwrap();
+        let own = Paths::under(&folder.join("ArtCraftLauncherData"));
+        let temporary = Paths::under(&dir.path().join("Temp").join("artcraft-launcher"));
+        for paths in [&own, &temporary] {
+            std::fs::create_dir_all(paths.downloads()).unwrap();
+        }
+        // Installed with the MSI: the helper calls `Paths::new` again.
+        assert!(same_cache_as_helper(&temporary, &exe).is_err_and(|e| e.contains("can't update itself")));
+        std::fs::write(folder.join("portable.txt"), "").unwrap();
+        assert_eq!(same_cache_as_helper(&own, &exe), Ok(()));
+        assert!(same_cache_as_helper(&temporary, &exe).is_err());
+    }
+
     /// An update whose swap couldn't be scheduled stays on offer, and a scheduled one is not
     /// offered again unless the helper, running alongside, records that it failed.
     #[test]
@@ -869,7 +907,7 @@ mod tests {
         let msi = dir.path().join("artcraft-launcher-0.2.0-windows-x64.msi");
         std::fs::write(&msi, "not a package").unwrap();
         for install in [Install::Msi(system_program("msiexec.exe")), Install::Portable(system_program("msiexec.exe"))] {
-            let error = windows_precheck(&install, &msi).unwrap_err();
+            let error = windows_precheck(&install, &Paths::under(dir.path()), &msi).unwrap_err();
             assert!(error.contains("isn't signed"), "{error}");
         }
     }
