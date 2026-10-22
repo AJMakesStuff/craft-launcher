@@ -100,13 +100,14 @@ impl Drop for Staging {
     }
 }
 
-fn extract(file: &Path, destination: &Path) -> Result<Vec<PathBuf>, String> {
+fn extract(file: &Path, destination: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>), String> {
     let file = std::fs::File::open(file).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("couldn't read the portable ZIP ({e})"))?;
     if archive.len() > MAX_FILES {
         return Err("The portable ZIP contains too many files.".into());
     }
     let mut files = Vec::new();
+    let mut entries = Vec::new();
     let mut total = 0u64;
     let mut seen = std::collections::BTreeSet::new();
     for index in 0..archive.len() {
@@ -123,6 +124,7 @@ fn extract(file: &Path, destination: &Path) -> Result<Vec<PathBuf>, String> {
             return Err("The portable ZIP contains duplicate paths.".into());
         }
         let target = destination.join(&relative);
+        entries.push(relative.clone());
         if entry.is_dir() {
             std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
             continue;
@@ -140,7 +142,7 @@ fn extract(file: &Path, destination: &Path) -> Result<Vec<PathBuf>, String> {
         }
         files.push(relative);
     }
-    Ok(files)
+    Ok((files, entries))
 }
 
 fn recorded_files<'a>(app: &CraftApp, record: &'a Record) -> Result<(&'a Path, Vec<PathBuf>), String> {
@@ -204,7 +206,7 @@ pub fn install(
     let staging = Staging(staging);
     let unpacked = staging.0.join("unpacked");
     std::fs::create_dir(&unpacked).map_err(|e| e.to_string())?;
-    let files = extract(file, &unpacked)?;
+    let (files, entries) = extract(file, &unpacked)?;
     // The official Windows packaging script uses Compress-Archive -Path $Portable,
     // which places all files inside a single versioned directory in the ZIP.
     // Accept that layout and traditional flat archives, but never arbitrary nesting.
@@ -220,7 +222,11 @@ pub fn install(
     } else {
         let prefix = files.first().and_then(|path| path.components().next()).ok_or("The portable ZIP contains no files.")?.as_os_str().to_os_string();
         let prefix = PathBuf::from(prefix);
-        if !files.iter().all(|path| path.strip_prefix(&prefix).is_ok_and(|relative| relative.components().next().is_some())) {
+        // Include explicit ZIP directory entries as well as extracted files.
+        // The wrapper directory itself is allowed; unrelated roots are not.
+        if !entries.iter().all(|path| path.starts_with(&prefix))
+            || !files.iter().all(|path| path.strip_prefix(&prefix).is_ok_and(|relative| relative.components().next().is_some()))
+        {
             return Err("The portable ZIP has an unsupported directory layout.".into());
         }
         let unpacked = unpacked.join(&prefix);
@@ -338,11 +344,34 @@ mod tests {
         let path = root.join(name);
         let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
         for (name, content) in files {
-            zip.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
-            zip.write_all(content).unwrap();
+            if name.ends_with('/') {
+                zip.add_directory(*name, zip::write::SimpleFileOptions::default()).unwrap();
+            } else {
+                zip.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+                zip.write_all(content).unwrap();
+            }
         }
         zip.finish().unwrap();
         path
+    }
+
+    #[test]
+    fn wrapped_layout_validates_explicit_directory_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = CraftApp::by_id("photocraft").unwrap();
+        let paths = Paths::under(dir.path());
+        let invalid = archive(
+            dir.path(),
+            "invalid-dirs.zip",
+            &[("wrapper/", b""), ("wrapper/photocraft.exe", b"program"), ("outside/", b"")],
+        );
+        let error = install(app, &invalid, "0.12.0", None, &paths, None, false, &mut |_| Ok(())).unwrap_err();
+        assert!(error.contains("unsupported directory layout"), "{error}");
+        assert!(!paths.apps().join(app.id).exists());
+
+        let valid = archive(dir.path(), "valid-dirs.zip", &[("wrapper/", b""), ("wrapper/photocraft.exe", b"program")]);
+        let record = install(app, &valid, "0.12.0", None, &paths, None, false, &mut |_| Ok(())).unwrap();
+        assert!(record.path.exists());
     }
 
     #[test]
