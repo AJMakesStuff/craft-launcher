@@ -345,6 +345,92 @@ mod tests {
         path
     }
 
+    #[test]
+    fn wrapped_packages_install_update_and_remove_at_a_stable_location() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = CraftApp::by_id("photocraft").unwrap();
+        let paths = Paths::under(dir.path());
+        let parent = dir.path().join("My Tools");
+        let mut previous = None;
+        // The published ZIPs wrap the app, CLI and resources in a versioned directory.
+        // Also exercise transitions to and from the older, flat layout.
+        for (version, prefix) in [
+            ("0.12.0", "photocraft-0.12.0-windows-x64-portable/"),
+            ("0.13.0", "photocraft-0.13.0-windows-x64-portable/"),
+            ("0.11.0", ""),
+            ("0.12.0", "photocraft-0.12.0-windows-x64-portable/"),
+        ] {
+            let zip = archive(
+                dir.path(),
+                "app.zip",
+                &[
+                    (&format!("{prefix}photocraft-cli.exe"), b"cli"),
+                    (&format!("{prefix}PhotoCraft.exe"), version.as_bytes()),
+                    (&format!("{prefix}lib/runtime.dll"), b"library"),
+                    (&format!("{prefix}LICENSE-MIT"), b"license"),
+                ],
+            );
+            let record = install(app, &zip, version, previous.as_ref(), &paths, Some(&parent), false, &mut |_| Ok(())).unwrap();
+            let root = std::fs::canonicalize(parent.join(app.id)).unwrap();
+            assert_eq!(record.path, root.join("PhotoCraft.exe"));
+            assert_eq!(std::fs::read(&record.path).unwrap(), version.as_bytes());
+            assert_eq!(std::fs::read(root.join("lib/runtime.dll")).unwrap(), b"library");
+            assert_eq!(record.files, ["photocraft-cli.exe", "PhotoCraft.exe", "lib/runtime.dll", "LICENSE-MIT"].map(|p| root.join(p)));
+            let personal = root.join("settings.json");
+            if previous.is_some() {
+                assert_eq!(std::fs::read(&personal).unwrap(), b"personal");
+            } else {
+                std::fs::write(&personal, b"personal").unwrap();
+            }
+            previous = Some(record);
+        }
+        let record = previous.unwrap();
+        remove(app, &record).unwrap();
+        assert!(record.files.iter().all(|p| !p.exists()));
+        assert_eq!(std::fs::read(parent.join("photocraft/settings.json")).unwrap(), b"personal");
+    }
+
+    #[test]
+    fn rejects_missing_executables_and_ambiguous_or_deep_wrappers() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = CraftApp::by_id("photocraft").unwrap();
+        let paths = Paths::under(dir.path());
+        for names in [
+            vec![],
+            vec!["package/photocraft-cli.exe"],
+            vec!["package/bin/photocraft.exe"],
+            vec!["one/photocraft.exe", "two/photocraft.exe"],
+            vec!["package/photocraft.exe", "outside.txt"],
+            vec!["package/photocraft.exe", "other/runtime.dll"],
+        ] {
+            let files: Vec<_> = names.iter().map(|name| (*name, b"content".as_slice())).collect();
+            let zip = archive(dir.path(), "invalid.zip", &files);
+            assert!(install(app, &zip, "0.12.0", None, &paths, None, false, &mut |_| Ok(())).is_err(), "{names:?}");
+            assert!(!paths.apps().join(app.id).exists());
+        }
+    }
+
+    #[test]
+    fn wrapped_update_keeps_collision_checks_and_rolls_back_failed_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = CraftApp::by_id("photocraft").unwrap();
+        let paths = Paths::under(dir.path());
+        let old = archive(dir.path(), "old.zip", &[("photocraft.exe", b"old"), ("lib.dll", b"library")]);
+        let record = install(app, &old, "0.11.0", None, &paths, None, false, &mut |_| Ok(())).unwrap();
+        let personal = paths.apps().join("photocraft/settings.json");
+        std::fs::write(&personal, b"keep").unwrap();
+        let collision = archive(dir.path(), "collision.zip", &[("package/photocraft.exe", b"new"), ("package/settings.json", b"overwrite")]);
+        let error = install(app, &collision, "0.12.0", Some(&record), &paths, None, false, &mut |_| Ok(())).unwrap_err();
+        assert_eq!(error, "The installation would overwrite an unrecorded file.");
+        let next = archive(dir.path(), "next.zip", &[("package/photocraft.exe", b"new"), ("package/new.dll", b"new")]);
+        let error = install(app, &next, "0.12.0", Some(&record), &paths, None, false, &mut |_| Err("manifest disk full".into())).unwrap_err();
+        assert_eq!(error, "manifest disk full");
+        assert_eq!(std::fs::read(record.path).unwrap(), b"old");
+        assert_eq!(std::fs::read(paths.apps().join("photocraft/lib.dll")).unwrap(), b"library");
+        assert!(!paths.apps().join("photocraft/new.dll").exists());
+        assert_eq!(std::fs::read(personal).unwrap(), b"keep");
+    }
+
     #[cfg(unix)]
     #[test]
     fn host_symlinks_are_allowed_but_owned_links_are_rejected() {
