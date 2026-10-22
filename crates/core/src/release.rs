@@ -73,6 +73,54 @@ pub fn download_prefix(repo: &str) -> String {
     format!("https://github.com/{repo}/releases/download/")
 }
 
+/// Whether `url` is a download that truly belongs to `repo`.
+///
+/// A raw `starts_with(prefix)` check is not enough: a value such as
+/// `https://github.com/storytold/craft-launcher/releases/download/../../../ATTACKER/REPO/releases/download/v1/x`
+/// shares the prefix textually, yet its interpreted path escapes the repository. The link is
+/// accepted only when the text after the prefix is exactly `<tag>/<name>` — two non-empty path
+/// segments with no traversal (`.`/`..`), no additional slashes, no query or fragment, and no
+/// backslash or percent-encoded separators that a client could later re-interpret.
+pub fn download_url_under(url: &str, prefix: &str) -> bool {
+    let Some(rest) = url.strip_prefix(prefix) else { return false };
+    download_suffix_ok(rest)
+}
+
+/// Whether `url` sits under a developer mirror `base` (ending in `/`) without escaping it.
+pub fn download_url_under_mirror(url: &str, base: &str) -> bool {
+    let Some(rest) = url.strip_prefix(base) else { return false };
+    // A mirror serves `<tag>/<name>` just like GitHub, but we only require that it can't climb out
+    // of its own folder; its layout is otherwise the developer's business.
+    !rest.is_empty() && !url.contains(['?', '#', '\\']) && !contains_traversal(rest) && !contains_encoded_separator(rest)
+}
+
+/// `<tag>/<name>`: exactly two non-empty segments, no traversal, no re-interpretable separators.
+fn download_suffix_ok(rest: &str) -> bool {
+    if rest.contains(['?', '#', '\\']) || contains_encoded_separator(rest) {
+        return false;
+    }
+    let mut parts = rest.split('/');
+    let (Some(tag), Some(name), None) = (parts.next(), parts.next(), parts.next()) else { return false };
+    !tag.is_empty()
+        && tag != "."
+        && tag != ".."
+        && tag.len() <= 64
+        && !tag.contains('\\')
+        && valid_file_name(name)
+}
+
+/// Any `.` or `..` path segment that could climb out of the repository.
+fn contains_traversal(rest: &str) -> bool {
+    rest.split('/').any(|seg| seg == "." || seg == "..")
+}
+
+/// Percent-encoded slash or backslash (`%2f`, `%5c`): a client could decode these back into
+/// separators after the check, so a confined URL must not contain them.
+fn contains_encoded_separator(rest: &str) -> bool {
+    let bytes = rest.as_bytes();
+    bytes.windows(3).any(|w| w[0] == b'%' && matches!(&w[1..].to_ascii_lowercase()[..], b"2f" | b"5c"))
+}
+
 /// Reads `GET /repos/<repo>/releases/latest` (or one element of `/releases`).
 pub fn parse_github_release(json: &str, repo: &str) -> Result<Release, String> {
     let v: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("unreadable answer from GitHub ({e})"))?;
@@ -119,7 +167,7 @@ fn release_from_value(v: &serde_json::Value, repo: &str) -> Result<Release, Stri
             list.iter()
                 .filter_map(|a| {
                     let name = a["name"].as_str().filter(|n| valid_file_name(n))?.to_string();
-                    let url = a["browser_download_url"].as_str().filter(|u| u.starts_with(&prefix) && !u.contains(['?', '#', '\\']))?.to_string();
+                    let url = a["browser_download_url"].as_str().filter(|u| download_url_under(u, &prefix))?.to_string();
                     let sha256 = a["digest"].as_str().and_then(|d| d.strip_prefix("sha256:")).filter(|h| is_hex64(h)).map(str::to_ascii_lowercase);
                     Some(Asset { name, size: a["size"].as_u64().unwrap_or(0), url, sha256 })
                 })
@@ -253,6 +301,27 @@ mod tests {
         }
         assert_eq!(parse_github_release(r#"{"message":"Not Found"}"#, REPO).unwrap_err(), "no releases yet");
         assert!(parse_github_release("<html>", REPO).is_err());
+    }
+
+    #[test]
+    fn traversal_cannot_escape_the_repository() {
+        // Raw-prefix matches but the interpreted path climbs into another repository (CWE-180).
+        for url in [
+            "https://github.com/storytold/photocraft/releases/download/../../../../attacker/repo/releases/download/v99/photocraft-99.0.0-linux-x86_64.AppImage",
+            "https://github.com/storytold/photocraft/releases/download/v1/../../../attacker/repo/x.dmg",
+            "https://github.com/storytold/photocraft/releases/download/./v1/x.dmg",
+            "https://github.com/storytold/photocraft/releases/download/v1/sub/x.dmg",
+            "https://github.com/storytold/photocraft/releases/download/v1%2f..%2f..%2fx.dmg",
+            "https://github.com/storytold/photocraft/releases/download/v1/x%2fy.dmg",
+        ] {
+            let prefix = download_prefix(REPO);
+            assert!(!download_url_under(url, &prefix), "{url}");
+            let r = parse_github_release(&api_json(url), REPO).unwrap();
+            assert!(r.assets.is_empty(), "{url}");
+        }
+        // A plain, confined download still passes.
+        let prefix = download_prefix(REPO);
+        assert!(download_url_under("https://github.com/storytold/photocraft/releases/download/v0.5.0/photocraft-0.5.0-macos-universal.dmg", &prefix));
     }
 
     #[test]
