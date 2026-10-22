@@ -406,9 +406,13 @@ impl RawNotice {
         if self.title.trim().is_empty() && self.body.trim().is_empty() {
             return None;
         }
-        let link = self
-            .maybe_web_link
-            .filter(|l| (l.starts_with("https://") || l.starts_with("http://")) && l.len() <= 2000 && !l.chars().any(char::is_whitespace));
+        // The link may reach the system opener (whose WSL fallback shells out), so refuse any
+        // shell/cmd metacharacter or control character in it as well as whitespace (CWE-78).
+        let link = self.maybe_web_link.filter(|l| {
+            (l.starts_with("https://") || l.starts_with("http://"))
+                && l.len() <= 2000
+                && !l.chars().any(|c| c.is_whitespace() || c.is_control() || release::is_shell_meta(c))
+        });
         Some(Notice {
             id: format!("{kind}:{}:{}", self.created_at.as_deref().unwrap_or(""), self.title.trim()),
             title: truncate(self.title.trim(), 200),
@@ -623,7 +627,8 @@ mod tests {
                 "\"alerts\": []",
                 r#""alerts": [
             {"title": "Security update", "body": "Update PdfCraft now.", "maybe_web_link": "https://getartcraft.com/security", "created_at": null},
-            {"title": "Bad link", "body": "x", "maybe_web_link": "javascript:alert(1)"}]"#,
+            {"title": "Bad link", "body": "x", "maybe_web_link": "javascript:alert(1)"},
+            {"title": "Shell link", "body": "x", "maybe_web_link": "https://getartcraft.com/a|calc.exe"}]"#,
             )
             .replace(
                 "\"app_renames\": []",
@@ -631,9 +636,10 @@ mod tests {
             "new_name_lower": "docucraft", "description": "Same app, new name.", "renamed_at": "2026-10-09T08:00:00Z"}]"#,
             );
         let feed = Feed::parse(&with_notices).unwrap();
-        assert_eq!(feed.alerts.len(), 2);
+        assert_eq!(feed.alerts.len(), 3);
         assert_eq!(feed.alerts[0].link.as_deref(), Some("https://getartcraft.com/security"));
         assert_eq!(feed.alerts[1].link, None, "only web links are kept");
+        assert_eq!(feed.alerts[2].link, None, "a link with shell metacharacters is dropped");
         let titles: Vec<&str> = feed.announcements.iter().map(|n| n.title.as_str()).collect();
         assert_eq!(titles, ["New: CADCraft 1.0", "PdfCraft is now DocuCraft"]);
         // Ids are stable across parses, so dismissals stick.
