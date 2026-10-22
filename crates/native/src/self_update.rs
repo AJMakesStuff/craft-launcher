@@ -498,6 +498,9 @@ pub fn finish(args: &[OsString]) -> Option<Result<(), String>> {
     // The new launcher, or the old one when the step failed.
     let started = signed_like(&me, &exe)
         .and_then(|()| process::spawn_detached(std::process::Command::new(&exe)).map_err(|e| format!("couldn't start {} ({e})", exe.display())));
+    if let Err(e) = &started {
+        record_failure(&paths, e);
+    }
     Some(done.and(started))
 }
 
@@ -598,11 +601,12 @@ fn run_step(reference: &Path, pid: u32, exe: &Path, step: &Finish, wait: std::ti
     let result = if process::wait_for_exit(pid, wait) {
         match step {
             Finish::Msi(msi) => signed_like(reference, msi).and_then(|()| install::windows::reinstall(msi)),
-            Finish::Portable { zip, tmp } => match exe.parent() {
-                Some(dir) => {
-                    crate::portable::unpack_over(zip, tmp, dir, &|file| if is_program(file) { signed_like(reference, file) } else { Ok(()) })
-                }
-                None => Err("the launcher isn't in a folder".into()),
+            Finish::Portable { zip, tmp } => match (exe.parent(), exe.file_name()) {
+                (Some(dir), Some(executable)) => crate::portable::unpack_over(zip, tmp, dir, executable, &|file| {
+                    // The expected launcher must be signed even when its contents aren't a PE file.
+                    if file.file_name() == Some(executable) || is_program(file) { signed_like(reference, file) } else { Ok(()) }
+                }),
+                _ => Err("the launcher isn't in a folder".into()),
             },
         }
     } else {
@@ -693,12 +697,13 @@ mod tests {
         std::fs::write(folder.join("ArtCraftLauncherData").join("settings.json"), "{}").unwrap();
         let zip = dir.path().join("artcraft-launcher-0.2.0-windows-x64-portable.zip");
         let mut writer = zip::ZipWriter::new(std::fs::File::create(&zip).unwrap());
+        let signed_exe = std::fs::read(system_program("cmd.exe")).unwrap();
         for (name, body) in [
-            ("artcraft-launcher-0.2.0-windows-x64-portable/artcraft-launcher.exe", "0.2.0"),
-            ("artcraft-launcher-0.2.0-windows-x64-portable/portable.txt", ""),
+            ("artcraft-launcher-0.2.0-windows-x64-portable/artcraft-launcher.exe", signed_exe.as_slice()),
+            ("artcraft-launcher-0.2.0-windows-x64-portable/portable.txt", b"".as_slice()),
         ] {
             writer.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
-            writer.write_all(body.as_bytes()).unwrap();
+            writer.write_all(body).unwrap();
         }
         writer.finish().unwrap();
         let tmp = dir.path().join("cache").join("launcher-update");
@@ -714,7 +719,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&exe).unwrap(), "0.1.0", "replaced while the old launcher was still running");
         old.wait().unwrap();
         helper.join().unwrap().unwrap();
-        assert_eq!(std::fs::read_to_string(&exe).unwrap(), "0.2.0");
+        assert_eq!(std::fs::read(&exe).unwrap(), signed_exe);
         assert_eq!(std::fs::read_to_string(folder.join("ArtCraftLauncherData").join("settings.json")).unwrap(), "{}");
         assert!(!folder.join("artcraft-launcher-0.2.0-windows-x64-portable").exists(), "the zip's folder must not be nested in the launcher's");
         assert!(!zip.exists() && !tmp.exists(), "the download and the staging folder are removed");
@@ -899,6 +904,8 @@ mod tests {
         let mut writer = zip::ZipWriter::new(std::fs::File::create(&zip).unwrap());
         writer.start_file("artcraft-launcher-0.2.0-windows-x64-portable/README.md", zip::write::SimpleFileOptions::default()).unwrap();
         writer.write_all(b"# ArtCraft Launcher").unwrap();
+        writer.start_file("artcraft-launcher-0.2.0-windows-x64-portable/artcraft-launcher.exe", zip::write::SimpleFileOptions::default()).unwrap();
+        writer.write_all(&std::fs::read(system_program("cmd.exe")).unwrap()).unwrap();
         // An unsigned program under a harmless name.
         writer.start_file("artcraft-launcher-0.2.0-windows-x64-portable/notes.txt", zip::write::SimpleFileOptions::default()).unwrap();
         writer.write_all(&std::fs::read(std::env::current_exe().unwrap()).unwrap()).unwrap();
@@ -910,6 +917,39 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&exe).unwrap(), "0.1.0");
         assert!(!folder.join("README.md").exists() && !folder.join("notes.txt").exists(), "nothing is copied");
         assert!(!zip.exists() && !tmp.exists());
+    }
+
+    /// A missing or malformed executable must be rejected before any installed file is changed.
+    #[cfg(windows)]
+    #[test]
+    fn a_portable_update_requires_a_signed_launcher_even_without_an_mz_header() {
+        use std::io::Write;
+        for launcher in [None, Some(b"not a Windows program".as_slice()), Some(b"".as_slice())] {
+            let dir = tempfile::tempdir().unwrap();
+            let folder = dir.path().join("ArtCraft Launcher");
+            std::fs::create_dir_all(folder.join("ArtCraftLauncherData")).unwrap();
+            let exe = folder.join("artcraft-launcher.exe");
+            std::fs::write(&exe, "old launcher").unwrap();
+            let settings = folder.join("ArtCraftLauncherData/settings.json");
+            std::fs::write(&settings, "settings").unwrap();
+            let zip = dir.path().join("update.zip");
+            let mut writer = zip::ZipWriter::new(std::fs::File::create(&zip).unwrap());
+            writer.start_file("launcher/README.md", zip::write::SimpleFileOptions::default()).unwrap();
+            writer.write_all(b"new readme").unwrap();
+            if let Some(body) = launcher {
+                writer.start_file("launcher/artcraft-launcher.exe", zip::write::SimpleFileOptions::default()).unwrap();
+                writer.write_all(body).unwrap();
+            }
+            writer.finish().unwrap();
+            let tmp = dir.path().join(PORTABLE_STAGING);
+            let step = Finish::Portable { zip: zip.clone(), tmp: tmp.clone() };
+            let error = run_step(&system_program("cmd.exe"), exited_pid(), &exe, &step, std::time::Duration::from_secs(5)).unwrap_err();
+            assert!(error.contains(if launcher.is_some() { "isn't signed" } else { "doesn't contain" }), "{error}");
+            assert_eq!(std::fs::read(&exe).unwrap(), b"old launcher");
+            assert_eq!(std::fs::read(&settings).unwrap(), b"settings");
+            assert!(!folder.join("README.md").exists());
+            assert!(!zip.exists() && !tmp.exists());
+        }
     }
 
     /// A copy that fails part way through puts the previous files back and removes the new ones,
@@ -926,13 +966,14 @@ mod tests {
         std::fs::write(&exe, "0.1.0").unwrap();
         let zip = dir.path().join("artcraft-launcher-0.2.0-windows-x64-portable.zip");
         let mut writer = zip::ZipWriter::new(std::fs::File::create(&zip).unwrap());
+        let signed_exe = std::fs::read(system_program("cmd.exe")).unwrap();
         for (name, body) in [
-            ("artcraft-launcher-0.2.0-windows-x64-portable/artcraft-launcher.exe", "0.2.0"),
-            ("artcraft-launcher-0.2.0-windows-x64-portable/README.md", "# ArtCraft Launcher"),
-            ("artcraft-launcher-0.2.0-windows-x64-portable/NOTICE", "notice"),
+            ("artcraft-launcher-0.2.0-windows-x64-portable/artcraft-launcher.exe", signed_exe.as_slice()),
+            ("artcraft-launcher-0.2.0-windows-x64-portable/README.md", b"# ArtCraft Launcher".as_slice()),
+            ("artcraft-launcher-0.2.0-windows-x64-portable/NOTICE", b"notice".as_slice()),
         ] {
             writer.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
-            writer.write_all(body.as_bytes()).unwrap();
+            writer.write_all(body).unwrap();
         }
         writer.finish().unwrap();
         let tmp = dir.path().join("cache").join(PORTABLE_STAGING);
