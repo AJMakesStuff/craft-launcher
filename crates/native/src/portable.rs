@@ -360,11 +360,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let app = CraftApp::by_id("photocraft").unwrap();
         let paths = Paths::under(dir.path());
-        let invalid = archive(
-            dir.path(),
-            "invalid-dirs.zip",
-            &[("wrapper/", b""), ("wrapper/photocraft.exe", b"program"), ("outside/", b"")],
-        );
+        let invalid = archive(dir.path(), "invalid-dirs.zip", &[("wrapper/", b""), ("wrapper/photocraft.exe", b"program"), ("outside/", b"")]);
         let error = install(app, &invalid, "0.12.0", None, &paths, None, false, &mut |_| Ok(())).unwrap_err();
         assert!(error.contains("unsupported directory layout"), "{error}");
         assert!(!paths.apps().join(app.id).exists());
