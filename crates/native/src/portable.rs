@@ -307,10 +307,17 @@ pub fn remove(app: &CraftApp, record: &Record) -> Result<(), String> {
 /// Unpacks the launcher's own portable zip into `staging`, with the same checks as an app's, and
 /// copies it over `folder` for a self-update. `check` must accept every unpacked file before
 /// any is copied, and again before the backup is removed. The archive must include `executable`.
-/// When every file sits in one top-level folder, that folder's contents are the program. A copy that fails puts the previous files back. When one of them can't be put back,
+/// When every file sits in one top-level folder, that folder's contents are the program. A copy
+/// that fails puts the previous files back. When one of them can't be put back,
 /// the previous files move to a `<staging>-recovery-<time>` folder beside `staging`, which no
 /// later update removes, and the error names it. `staging` is removed afterwards.
-pub fn unpack_over(zip: &Path, staging: &Path, folder: &Path, executable: &std::ffi::OsStr, check: &dyn Fn(&Path) -> Result<(), String>) -> Result<(), String> {
+pub fn unpack_over(
+    zip: &Path,
+    staging: &Path,
+    folder: &Path,
+    executable: &std::ffi::OsStr,
+    check: &dyn Fn(&Path) -> Result<(), String>,
+) -> Result<(), String> {
     let backup = staging.join("backup");
     // A failed update whose files couldn't be moved to a recovery folder: never clear them.
     if backup.exists() {
@@ -325,7 +332,14 @@ pub fn unpack_over(zip: &Path, staging: &Path, folder: &Path, executable: &std::
     result
 }
 
-fn replace_with(zip: &Path, staging: &Path, folder: &Path, executable: &std::ffi::OsStr, check: &dyn Fn(&Path) -> Result<(), String>, keep: &mut bool) -> Result<(), String> {
+fn replace_with(
+    zip: &Path,
+    staging: &Path,
+    folder: &Path,
+    executable: &std::ffi::OsStr,
+    check: &dyn Fn(&Path) -> Result<(), String>,
+    keep: &mut bool,
+) -> Result<(), String> {
     let unpacked = staging.join("unpacked");
     let backup = staging.join("backup");
     std::fs::create_dir_all(&unpacked).map_err(|e| e.to_string())?;
