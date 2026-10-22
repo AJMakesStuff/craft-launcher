@@ -186,7 +186,9 @@ impl FeedRelease {
     /// when it doesn't hold up (no tag, or not a version).
     fn to_release(&self, repo: &str, mirror: Option<&str>) -> Option<Release> {
         let version = version::parse(&self.tag)?;
-        let allowed = |url: &str| release::download_url_under(url, &release::download_prefix(repo)) || mirror.is_some_and(|m| release::download_url_under_mirror(url, m));
+        let allowed = |url: &str| {
+            release::download_url_under(url, &release::download_prefix(repo)) || mirror.is_some_and(|m| release::download_url_under_mirror(url, m))
+        };
         let releases_page = format!("https://github.com/{repo}/releases/");
         let assets = self
             .assets

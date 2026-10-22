@@ -37,6 +37,11 @@ fn main() -> ExitCode {
     // First, so the panic report and every start-up warning are recorded (`logging`).
     let logs = logging::install();
     logging::install_panic_hook();
+    // A copy of the launcher finishing a self-update: no window, log file or single-instance claim.
+    #[cfg(windows)]
+    if let Some(done) = artcraft_launcher_native::self_update::finish(&std::env::args_os().skip(1).collect::<Vec<_>>()) {
+        return if done.is_ok() { ExitCode::SUCCESS } else { ExitCode::FAILURE };
+    }
     // Detect system language in the background so the first frame can use it.
     artcraft_launcher_ui_egui::i18n::detect_system_lang_in_background();
     // Detect Discord protocol handler in the background without blocking startup.
@@ -71,6 +76,11 @@ fn main() -> ExitCode {
                 log::warn!("no log file: {e}");
             }
         }
+    }
+    if let Some(error) =
+        artcraft_launcher_native::paths::Paths::new().ok().and_then(|paths| artcraft_launcher_native::self_update::take_failure(&paths))
+    {
+        log::warn!("the last self-update didn't install: {error}");
     }
     let (tray_loop, woken) = sync_channel(1);
     let waker = Arc::new(Waker { window: Mutex::new(None), tray_loop, quit_pending: AtomicBool::new(false) });

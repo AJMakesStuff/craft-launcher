@@ -325,6 +325,7 @@ dependencies = [
  "tar",
  "tempfile",
  "ureq",
+ "verifysign",
  "winreg",
  "winsafe",
  "zip",
@@ -4989,6 +4990,16 @@ dependencies = [
  "glifo",
  "hashbrown 0.17.1",
  "vello_common",
+]
+
+[[package]]
+name = "verifysign"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6acfcc42a8d44f340d001193d97ef56bf33210b51ad760ae8308c97d5241ca51"
+dependencies = [
+ "core-foundation 0.10.1",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

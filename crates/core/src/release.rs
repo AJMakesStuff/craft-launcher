@@ -118,12 +118,7 @@ fn download_suffix_ok(rest: &str) -> bool {
     }
     let mut parts = rest.split('/');
     let (Some(tag), Some(name), None) = (parts.next(), parts.next(), parts.next()) else { return false };
-    !tag.is_empty()
-        && tag != "."
-        && tag != ".."
-        && tag.len() <= 64
-        && !tag.contains('\\')
-        && valid_file_name(name)
+    !tag.is_empty() && tag != "." && tag != ".." && tag.len() <= 64 && !tag.contains('\\') && valid_file_name(name)
 }
 
 /// Any `.` or `..` path segment that could climb out of the repository.

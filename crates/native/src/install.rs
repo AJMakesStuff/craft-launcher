@@ -1534,6 +1534,13 @@ pub mod windows {
         })
     }
 
+    /// Runs the launcher's own new MSI for a self-update, with the same progress window and no
+    /// restart as [`run_msi`], and waits for it.
+    pub fn reinstall(msi: &Path) -> Result<(), String> {
+        let status = msi_command(&msiexec(), msi)?.status().map_err(|e| format!("couldn't start the Windows Installer ({e})"))?;
+        explain(status.code())
+    }
+
     /// Runs `work` once no other Windows Installer job of ours is running (a second one would
     /// stop with error 1618). Cancelled while it waits, it never runs.
     fn in_turn(stop: &Stop, phase: &mut dyn FnMut(JobPhase), working: JobPhase, work: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
