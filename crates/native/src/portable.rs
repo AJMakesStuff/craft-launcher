@@ -100,13 +100,14 @@ impl Drop for Staging {
     }
 }
 
-fn extract(file: &Path, destination: &Path) -> Result<Vec<PathBuf>, String> {
+fn extract(file: &Path, destination: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>), String> {
     let file = std::fs::File::open(file).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("couldn't read the portable ZIP ({e})"))?;
     if archive.len() > MAX_FILES {
         return Err("The portable ZIP contains too many files.".into());
     }
     let mut files = Vec::new();
+    let mut entries = Vec::new();
     let mut total = 0u64;
     let mut seen = std::collections::BTreeSet::new();
     for index in 0..archive.len() {
@@ -123,6 +124,7 @@ fn extract(file: &Path, destination: &Path) -> Result<Vec<PathBuf>, String> {
             return Err("The portable ZIP contains duplicate paths.".into());
         }
         let target = destination.join(&relative);
+        entries.push(relative.clone());
         if entry.is_dir() {
             std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
             continue;
@@ -140,7 +142,7 @@ fn extract(file: &Path, destination: &Path) -> Result<Vec<PathBuf>, String> {
         }
         files.push(relative);
     }
-    Ok(files)
+    Ok((files, entries))
 }
 
 fn recorded_files<'a>(app: &CraftApp, record: &'a Record) -> Result<(&'a Path, Vec<PathBuf>), String> {
@@ -204,7 +206,36 @@ pub fn install(
     let staging = Staging(staging);
     let unpacked = staging.0.join("unpacked");
     std::fs::create_dir(&unpacked).map_err(|e| e.to_string())?;
-    let files = extract(file, &unpacked)?;
+    let (files, entries) = extract(file, &unpacked)?;
+    // The official Windows packaging script uses Compress-Archive -Path $Portable,
+    // which places all files inside a single versioned directory in the ZIP.
+    // Accept that layout and traditional flat archives, but never arbitrary nesting.
+    let has_root_executable = files.iter().any(|relative| {
+        relative.parent().is_some_and(|parent| parent.as_os_str().is_empty())
+            && relative
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| app.stems().any(|stem| name.eq_ignore_ascii_case(&format!("{stem}.exe"))))
+    });
+    let (unpacked, files) = if has_root_executable {
+        (unpacked, files)
+    } else {
+        let prefix = files.first().and_then(|path| path.components().next()).ok_or("The portable ZIP contains no files.")?.as_os_str().to_os_string();
+        let prefix = PathBuf::from(prefix);
+        // Include explicit ZIP directory entries as well as extracted files.
+        // The wrapper directory itself is allowed; unrelated roots are not.
+        if !entries.iter().all(|path| path.starts_with(&prefix))
+            || !files.iter().all(|path| path.strip_prefix(&prefix).is_ok_and(|relative| relative.components().next().is_some()))
+        {
+            return Err("The portable ZIP has an unsupported directory layout.".into());
+        }
+        let unpacked = unpacked.join(&prefix);
+        let files: Vec<PathBuf> = files
+            .into_iter()
+            .map(|path| path.strip_prefix(&prefix).map(Path::to_path_buf).map_err(|e| e.to_string()))
+            .collect::<Result<Vec<_>, _>>()?;
+        (unpacked, files)
+    };
     let executable = files
         .iter()
         .find(|relative| {
@@ -343,7 +374,7 @@ fn replace_with(
     let unpacked = staging.join("unpacked");
     let backup = staging.join("backup");
     std::fs::create_dir_all(&unpacked).map_err(|e| e.to_string())?;
-    let files = extract(zip, &unpacked)?;
+    let (files, _) = extract(zip, &unpacked)?;
     let top = single_top_folder(&files);
     let files = files
         .into_iter()
@@ -479,11 +510,116 @@ mod tests {
         let path = root.join(name);
         let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
         for (name, content) in files {
-            zip.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
-            zip.write_all(content).unwrap();
+            if name.ends_with('/') {
+                zip.add_directory(*name, zip::write::SimpleFileOptions::default()).unwrap();
+            } else {
+                zip.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+                zip.write_all(content).unwrap();
+            }
         }
         zip.finish().unwrap();
         path
+    }
+
+    #[test]
+    fn wrapped_layout_validates_explicit_directory_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = CraftApp::by_id("photocraft").unwrap();
+        let paths = Paths::under(dir.path());
+        let invalid = archive(dir.path(), "invalid-dirs.zip", &[("wrapper/", b""), ("wrapper/photocraft.exe", b"program"), ("outside/", b"")]);
+        let error = install(app, &invalid, "0.12.0", None, &paths, None, false, &mut |_| Ok(())).unwrap_err();
+        assert!(error.contains("unsupported directory layout"), "{error}");
+        assert!(!paths.apps().join(app.id).exists());
+
+        let valid = archive(dir.path(), "valid-dirs.zip", &[("wrapper/", b""), ("wrapper/photocraft.exe", b"program")]);
+        let record = install(app, &valid, "0.12.0", None, &paths, None, false, &mut |_| Ok(())).unwrap();
+        assert!(record.path.exists());
+    }
+
+    #[test]
+    fn wrapped_packages_install_update_and_remove_at_a_stable_location() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = CraftApp::by_id("photocraft").unwrap();
+        let paths = Paths::under(dir.path());
+        let parent = dir.path().join("My Tools");
+        let mut previous = None;
+        // The published ZIPs wrap the app, CLI and resources in a versioned directory.
+        // Also exercise transitions to and from the older, flat layout.
+        for (version, prefix) in [
+            ("0.12.0", "photocraft-0.12.0-windows-x64-portable/"),
+            ("0.13.0", "photocraft-0.13.0-windows-x64-portable/"),
+            ("0.11.0", ""),
+            ("0.12.0", "photocraft-0.12.0-windows-x64-portable/"),
+        ] {
+            let zip = archive(
+                dir.path(),
+                "app.zip",
+                &[
+                    (&format!("{prefix}photocraft-cli.exe"), b"cli"),
+                    (&format!("{prefix}PhotoCraft.exe"), version.as_bytes()),
+                    (&format!("{prefix}lib/runtime.dll"), b"library"),
+                    (&format!("{prefix}LICENSE-MIT"), b"license"),
+                ],
+            );
+            let record = install(app, &zip, version, previous.as_ref(), &paths, Some(&parent), false, &mut |_| Ok(())).unwrap();
+            let root = std::fs::canonicalize(parent.join(app.id)).unwrap();
+            assert_eq!(record.path, root.join("PhotoCraft.exe"));
+            assert_eq!(std::fs::read(&record.path).unwrap(), version.as_bytes());
+            assert_eq!(std::fs::read(root.join("lib/runtime.dll")).unwrap(), b"library");
+            assert_eq!(record.files, ["photocraft-cli.exe", "PhotoCraft.exe", "lib/runtime.dll", "LICENSE-MIT"].map(|p| root.join(p)));
+            let personal = root.join("settings.json");
+            if previous.is_some() {
+                assert_eq!(std::fs::read(&personal).unwrap(), b"personal");
+            } else {
+                std::fs::write(&personal, b"personal").unwrap();
+            }
+            previous = Some(record);
+        }
+        let record = previous.unwrap();
+        remove(app, &record).unwrap();
+        assert!(record.files.iter().all(|p| !p.exists()));
+        assert_eq!(std::fs::read(parent.join("photocraft/settings.json")).unwrap(), b"personal");
+    }
+
+    #[test]
+    fn rejects_missing_executables_and_ambiguous_or_deep_wrappers() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = CraftApp::by_id("photocraft").unwrap();
+        let paths = Paths::under(dir.path());
+        for names in [
+            vec![],
+            vec!["package/photocraft-cli.exe"],
+            vec!["package/bin/photocraft.exe"],
+            vec!["one/photocraft.exe", "two/photocraft.exe"],
+            vec!["package/photocraft.exe", "outside.txt"],
+            vec!["package/photocraft.exe", "other/runtime.dll"],
+        ] {
+            let files: Vec<_> = names.iter().map(|name| (*name, b"content".as_slice())).collect();
+            let zip = archive(dir.path(), "invalid.zip", &files);
+            assert!(install(app, &zip, "0.12.0", None, &paths, None, false, &mut |_| Ok(())).is_err(), "{names:?}");
+            assert!(!paths.apps().join(app.id).exists());
+        }
+    }
+
+    #[test]
+    fn wrapped_update_keeps_collision_checks_and_rolls_back_failed_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = CraftApp::by_id("photocraft").unwrap();
+        let paths = Paths::under(dir.path());
+        let old = archive(dir.path(), "old.zip", &[("photocraft.exe", b"old"), ("lib.dll", b"library")]);
+        let record = install(app, &old, "0.11.0", None, &paths, None, false, &mut |_| Ok(())).unwrap();
+        let personal = paths.apps().join("photocraft/settings.json");
+        std::fs::write(&personal, b"keep").unwrap();
+        let collision = archive(dir.path(), "collision.zip", &[("package/photocraft.exe", b"new"), ("package/settings.json", b"overwrite")]);
+        let error = install(app, &collision, "0.12.0", Some(&record), &paths, None, false, &mut |_| Ok(())).unwrap_err();
+        assert_eq!(error, "The installation would overwrite an unrecorded file.");
+        let next = archive(dir.path(), "next.zip", &[("package/photocraft.exe", b"new"), ("package/new.dll", b"new")]);
+        let error = install(app, &next, "0.12.0", Some(&record), &paths, None, false, &mut |_| Err("manifest disk full".into())).unwrap_err();
+        assert_eq!(error, "manifest disk full");
+        assert_eq!(std::fs::read(record.path).unwrap(), b"old");
+        assert_eq!(std::fs::read(paths.apps().join("photocraft/lib.dll")).unwrap(), b"library");
+        assert!(!paths.apps().join("photocraft/new.dll").exists());
+        assert_eq!(std::fs::read(personal).unwrap(), b"keep");
     }
 
     #[cfg(unix)]
@@ -635,6 +771,45 @@ mod tests {
         install(app, &zip, "0.5.0", None, &paths, None, true, &mut |_| Ok(())).unwrap();
         assert_eq!(std::fs::read(folder.join("photocraft.exe")).unwrap(), b"new");
         assert_eq!(std::fs::read(folder.join("notes.txt")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn installs_official_single_directory_portable_zip() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = CraftApp::by_id("photocraft").unwrap();
+        let paths = Paths::under(dir.path());
+        let zip = archive(
+            dir.path(),
+            "release.zip",
+            &[
+                ("photocraft-0.6.1-windows-x64-portable/photocraft.exe", b"program"),
+                ("photocraft-0.6.1-windows-x64-portable/portable.txt", b""),
+                ("photocraft-0.6.1-windows-x64-portable/lib/runtime.dll", b"library"),
+            ],
+        );
+        let record = install(app, &zip, "0.6.1", None, &paths, None, false, &mut |_| Ok(())).unwrap();
+        assert_eq!(record.path.file_name().unwrap(), "photocraft.exe");
+        assert_eq!(record.path.parent().unwrap().file_name().unwrap(), "photocraft");
+        assert_eq!(std::fs::read(&record.path).unwrap(), b"program");
+        assert_eq!(std::fs::read(paths.apps().join("photocraft/lib/runtime.dll")).unwrap(), b"library");
+        assert_eq!(record.files.len(), 3);
+        remove(app, &record).unwrap();
+        assert!(!record.path.exists());
+    }
+
+    #[test]
+    fn rejects_mixed_root_and_multiple_directory_archives() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = CraftApp::by_id("photocraft").unwrap();
+        let paths = Paths::under(dir.path());
+        for (name, entries) in [
+            ("mixed.zip", vec![("package/photocraft.exe", b"program".as_slice()), ("another/readme.txt", b"other".as_slice())]),
+            ("nested.zip", vec![("wrapper/inner/photocraft.exe", b"program".as_slice())]),
+        ] {
+            let zip = archive(dir.path(), name, &entries);
+            assert!(install(app, &zip, "0.6.1", None, &paths, None, false, &mut |_| Ok(())).is_err(), "{name}");
+            assert!(!paths.apps().join("photocraft/photocraft.exe").exists());
+        }
     }
 
     #[test]
