@@ -99,9 +99,9 @@ impl Staging {
     /// is the only copy left for manual recovery.
     fn keep(self) -> PathBuf {
         let path = self.0.clone();
-        // NOSONAR: deliberately skipping Drop here is the whole point — it would delete the
-        // recovery files. The directory is handed to the operator, not leaked into nothing.
-        std::mem::forget(self);
+        // Deliberately skipping Drop here is the whole point — it would delete the recovery
+        // files. The directory is handed to the operator, not leaked into nothing.
+        std::mem::forget(self); // NOSONAR
         path
     }
 }
