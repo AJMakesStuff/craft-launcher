@@ -959,6 +959,8 @@ pub(crate) mod linux {
         let staging = super::staging_dir(&dir)?;
         let partial = staging.path().join(name);
         std::fs::copy(file, &partial).map_err(|e| format!("couldn't copy the AppImage ({e})"))?;
+        // NOSONAR: the AppImage is the program the user just installed and must be executable;
+        // 0o755 is not group/world-writable.
         std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
         std::fs::rename(&partial, &dest).map_err(|e| format!("couldn't put the AppImage in place ({e})"))?;
         let mut removed = Vec::new();
@@ -1022,6 +1024,8 @@ pub(crate) mod linux {
         if !here.metadata().map_err(|e| e.to_string())?.file_type().is_file() {
             return Err("the download's app binary isn't a regular file".into());
         }
+        // NOSONAR: verified non-symlink regular file inside the launcher's apps folder; the app
+        // binary must be executable and 0o755 is not group/world-writable.
         std::fs::set_permissions(bin, std::fs::Permissions::from_mode(0o755)).map_err(|e| format!("couldn't make {} runnable ({e})", bin.display()))
     }
 
