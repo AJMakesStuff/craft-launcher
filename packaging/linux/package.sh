@@ -23,6 +23,7 @@ set -euo pipefail
 HERE="$ROOT/packaging/linux"
 APP_ID=ai.storyteller.artcraft-launcher
 PKG=artcraft-launcher
+# sha256sum -c's line: <hash>  <path>, used for every downloaded artifact.
 
 SKIP_BUILD=0
 FORMATS="appimage deb rpm tar"
