@@ -481,6 +481,19 @@ mod linux_tests {
         assert!(linux::pacman_db_present(&root.path().join("local")));
     }
 
+    /// `linux::binary_version` on a script the test just wrote. Another test thread that forks
+    /// while the script is still open for writing holds that descriptor until it execs, and running
+    /// the script in that window fails with ETXTBSY ("Text file busy"), so a miss is retried.
+    fn binary_version_of_new_script(bin: &Path, app: &CraftApp) -> Option<version::Version> {
+        for _ in 0..20 {
+            if let Some(v) = linux::binary_version(bin, app) {
+                return Some(v);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        None
+    }
+
     #[test]
     fn reads_binary_version_from_cli() {
         let photo = CraftApp::by_id("photocraft").unwrap();
@@ -489,7 +502,7 @@ mod linux_tests {
         std::fs::write(&bin, "#!/bin/sh\necho 'photocraft 0.6.0 (0c72d9542, 2026-10-10)'\n").unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let ver = linux::binary_version(&bin, photo);
+        let ver = binary_version_of_new_script(&bin, photo);
         assert_eq!(ver.unwrap().to_string(), "0.6.0");
     }
 
@@ -504,9 +517,9 @@ mod linux_tests {
             bin
         };
         let sound = write("soundcraft", "#!/bin/sh\necho 'SoundCraft 0.5.0'\n");
-        assert_eq!(linux::binary_version(&sound, CraftApp::by_id("soundcraft").unwrap()).unwrap().to_string(), "0.5.0");
+        assert_eq!(binary_version_of_new_script(&sound, CraftApp::by_id("soundcraft").unwrap()).unwrap().to_string(), "0.5.0");
         let pdf = write("pdfcraft", "#!/bin/sh\necho 'printcraft 0.2.1'\n");
-        assert_eq!(linux::binary_version(&pdf, CraftApp::by_id("pdfcraft").unwrap()).unwrap().to_string(), "0.2.1");
+        assert_eq!(binary_version_of_new_script(&pdf, CraftApp::by_id("pdfcraft").unwrap()).unwrap().to_string(), "0.2.1");
     }
 }
 
