@@ -86,6 +86,38 @@ struct Shared {
     pictures_busy: Mutex<std::collections::HashSet<&'static str>>,
 }
 
+#[derive(Clone, Copy)]
+enum BusyFlag {
+    Checking,
+    Detecting,
+}
+
+struct BusyGuard {
+    shared: Arc<Shared>,
+    flag: BusyFlag,
+}
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        let flag = match self.flag {
+            BusyFlag::Checking => &self.shared.checking,
+            BusyFlag::Detecting => &self.shared.detecting,
+        };
+        flag.store(false, Ordering::SeqCst);
+    }
+}
+
+struct JobGuard {
+    shared: Arc<Shared>,
+    app_id: String,
+}
+
+impl Drop for JobGuard {
+    fn drop(&mut self) {
+        self.shared.jobs.lock().unwrap_or_else(PoisonError::into_inner).remove(&self.app_id);
+    }
+}
+
 impl Shared {
     fn emit(&self, event: Event) {
         self.events.lock().unwrap_or_else(PoisonError::into_inner).push(event);
@@ -179,10 +211,12 @@ impl NativeBackend {
             return;
         }
         let shared = self.shared.clone();
+        let busy = BusyGuard { shared: shared.clone(), flag: BusyFlag::Detecting };
         let paths = self.paths.clone();
         let platform = self.platform;
         let options = self.options();
         std::thread::spawn(move || {
+            let busy = busy;
             // Leftovers from interrupted installs or older versions of the launcher. A paused
             // download stays a month; a finished one kept after a failed install, a week.
             http::clean_downloads(&paths.downloads(), Duration::from_secs(30 * 86_400), Duration::from_secs(7 * 86_400));
@@ -203,7 +237,7 @@ impl NativeBackend {
             for app in &SUITE {
                 report_partial(app, &shared, &paths, platform, &options);
             }
-            shared.detecting.store(false, Ordering::SeqCst);
+            drop(busy);
         });
     }
 
@@ -227,11 +261,13 @@ impl NativeBackend {
             return;
         }
         let shared = self.shared.clone();
+        let busy = BusyGuard { shared: shared.clone(), flag: BusyFlag::Checking };
         let paths = self.paths.clone();
         let platform = self.platform;
         let pre = self.options().prereleases;
         let mirror = local_mirror();
         std::thread::spawn(move || {
+            let busy = busy;
             shared.emit(Event::CheckStarted);
             let (feed, fallback) = check_plan(&http, mirror.as_ref(), pre, &paths, &shared);
             if let Some(f) = &feed {
@@ -255,8 +291,8 @@ impl NativeBackend {
             let source_used = source_used_of(&sources);
             let at = crate::now();
             *shared.last_check.lock().unwrap_or_else(PoisonError::into_inner) = Some(at);
-            shared.checking.store(false, Ordering::SeqCst);
             let rate_limited_until = limit_notice(source_used, source.rate_limited_until());
+            drop(busy);
             shared.emit(Event::CheckFinished { at, source: source_used, rate_limited_until });
         });
     }
@@ -283,11 +319,13 @@ impl NativeBackend {
             return;
         }
         let shared = self.shared.clone();
+        let job = JobGuard { shared: shared.clone(), app_id: app.id.to_string() };
         let paths = self.paths.clone();
         let http = self.http.clone();
         let platform = self.platform;
         let options = self.options();
         std::thread::spawn(move || {
+            let job = job;
             let existing = shared.installed.lock().unwrap_or_else(PoisonError::into_inner).get(app.id).cloned();
             let record = shared.manifest.lock().unwrap_or_else(PoisonError::into_inner).apps.get(app.id).cloned();
             let result = if uninstall {
@@ -347,7 +385,7 @@ impl NativeBackend {
                 };
             }
             shared.emit(Event::Detected { app: app.id.to_string(), installed: found });
-            shared.jobs.lock().unwrap_or_else(PoisonError::into_inner).remove(app.id);
+            drop(job);
             shared.emit(Event::JobFinished { app: app.id.to_string(), result });
         });
     }
@@ -371,8 +409,10 @@ impl NativeBackend {
             }
             jobs.insert(id.clone(), stop.clone());
         }
+        let job = JobGuard { shared: self.shared.clone(), app_id: id.clone() };
         let (shared, paths, http) = (self.shared.clone(), self.paths.clone(), self.http.clone());
         std::thread::spawn(move || {
+            let job = job;
             let mut last_emit = Instant::now() - Duration::from_secs(1);
             let mut phase = |p: JobPhase| {
                 if matches!(p, JobPhase::Downloading { done, total } if done != total && done != 0) && last_emit.elapsed() < Duration::from_millis(50)
@@ -390,7 +430,7 @@ impl NativeBackend {
                 Some(http) => crate::self_update::update(&install, &release, platform, http, &paths, &stop, &mut phase, &last),
                 None => Err("secure connections aren't available on this system".into()),
             };
-            shared.jobs.lock().unwrap_or_else(PoisonError::into_inner).remove(LAUNCHER_ID);
+            drop(job);
             match result {
                 Ok(()) => shared.emit(Event::LauncherRestarting),
                 Err(e) => {
@@ -1480,6 +1520,87 @@ mod tests {
             Event::ReadyToInstall { app, ready } if app == APP => Some(ready),
             _ => None,
         })
+    }
+
+    fn wait_until(mut ready: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !ready() {
+            assert!(Instant::now() < deadline, "the worker did not finish unwinding");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn panic_on_wake() -> (Waker, mpsc::Receiver<()>) {
+        let (sent, received) = mpsc::channel();
+        (
+            Arc::new(move || {
+                let _ = sent.send(());
+                panic!("injected worker panic")
+            }),
+            received,
+        )
+    }
+
+    #[test]
+    fn a_panicking_detection_worker_releases_its_busy_flag() {
+        let Some(platform) = native_platform() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let mut backend = backend(dir.path(), platform, None);
+        let (waker, woke) = panic_on_wake();
+        Arc::get_mut(&mut backend.shared).unwrap().waker = waker;
+
+        backend.detect_all();
+        woke.recv_timeout(Duration::from_secs(2)).unwrap();
+        wait_until(|| !backend.shared.detecting.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_panicking_check_worker_releases_its_busy_flag() {
+        let Some(platform) = native_platform() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let mut backend = backend(dir.path(), platform, Some(Arc::new(CountingGitHub::default())));
+        backend.http = Some(Http::new().unwrap());
+        let (waker, woke) = panic_on_wake();
+        Arc::get_mut(&mut backend.shared).unwrap().waker = waker;
+
+        backend.check(true);
+        woke.recv_timeout(Duration::from_secs(2)).unwrap();
+        wait_until(|| !backend.shared.checking.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_panicking_job_worker_removes_its_busy_entry() {
+        let Some(platform) = native_platform() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let mut backend = backend(dir.path(), platform, None);
+        let (waker, woke) = panic_on_wake();
+        Arc::get_mut(&mut backend.shared).unwrap().waker = waker;
+
+        backend.start_job(APP, Work::Uninstall);
+        woke.recv_timeout(Duration::from_secs(2)).unwrap();
+        wait_until(|| !backend.shared.jobs.lock().unwrap().contains_key(APP));
+    }
+
+    #[test]
+    fn job_finished_is_emitted_after_its_busy_entry_is_removed() {
+        let Some(platform) = native_platform() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let mut backend = backend(dir.path(), platform, None);
+        let shared: Arc<Mutex<Option<std::sync::Weak<Shared>>>> = Arc::new(Mutex::new(None));
+        let shared_for_waker = shared.clone();
+        let (sent, received) = mpsc::channel();
+        Arc::get_mut(&mut backend.shared).unwrap().waker = Arc::new(move || {
+            let Some(shared) = shared_for_waker.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade) else { return };
+            let finished = shared.events.lock().unwrap().iter().any(|event| matches!(event, Event::JobFinished { app, .. } if app == APP));
+            if finished {
+                let busy = shared.jobs.lock().unwrap().contains_key(APP);
+                let _ = sent.send(busy);
+            }
+        });
+        *shared.lock().unwrap() = Some(Arc::downgrade(&backend.shared));
+
+        backend.start_job(APP, Work::Uninstall);
+        assert!(!received.recv_timeout(Duration::from_secs(2)).unwrap());
     }
 
     /// Puts the planned download on disk, as a failed install leaves it.
