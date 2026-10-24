@@ -246,7 +246,9 @@ pub fn valid_file_name(name: &str) -> bool {
         && !name.chars().any(|c| c.is_control() || matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*'))
 }
 
-fn truncate(s: &str, max: usize) -> String {
+/// `s` cut to at most `max` bytes (on a char boundary) with an ellipsis, for text from a
+/// release or the feed shown in the UI.
+pub(crate) fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
     }
@@ -262,6 +264,14 @@ mod tests {
     use super::*;
 
     const REPO: &str = "storytold/photocraft";
+
+    #[test]
+    fn truncate_keeps_whole_characters() {
+        assert_eq!(truncate("short", 10), "short");
+        assert_eq!(truncate("abcdef", 3), "abc…");
+        // `é` is two bytes: cutting at 2 would split it, so the cut backs off to 1.
+        assert_eq!(truncate("aé", 2), "a…");
+    }
 
     #[test]
     fn only_plain_https_links_pass() {

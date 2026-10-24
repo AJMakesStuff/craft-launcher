@@ -18,7 +18,7 @@ use serde::Deserialize;
 use serde::de::{DeserializeOwned, Deserializer};
 
 use crate::catalog::{CraftApp, GITHUB_OWNER};
-use crate::release::{self, Asset, Release};
+use crate::release::{self, Asset, Release, truncate};
 use crate::time::parse_rfc3339;
 use crate::version;
 
@@ -423,17 +423,6 @@ impl RawNotice {
             created_at: self.created_at.as_deref().and_then(parse_rfc3339),
         })
     }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
-    }
-    let mut end = max;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &s[..end])
 }
 
 #[cfg(test)]
