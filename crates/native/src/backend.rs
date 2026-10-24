@@ -885,8 +885,12 @@ fn fetch_feed(http: &Http, paths: &Paths, url: &str, throttle: &Mutex<FeedThrott
 fn feed_url() -> String {
     std::env::var("ARTCRAFT_LAUNCHER_FEED_URL")
         .ok()
-        .filter(|u| u.starts_with("https://") || is_loopback(u))
+        .filter(|u| feed_url_override_allowed(u, cfg!(feature = "local-mirror")))
         .unwrap_or_else(|| artcraft_launcher_core::feed::FEED_URL.to_string())
+}
+
+fn feed_url_override_allowed(url: &str, allow_https: bool) -> bool {
+    is_loopback(url) || (allow_https && url.starts_with("https://"))
 }
 
 /// `http://<loopback host>:<port>` and an optional path: the host must be exactly 127.0.0.1,
@@ -1098,7 +1102,17 @@ mod tests {
     use artcraft_launcher_core::protocol::LatestRelease;
 
     use super::*;
+
     use crate::source::Answer;
+
+    #[test]
+    fn feed_url_overrides_are_loopback_only_outside_local_mirror_builds() {
+        assert!(feed_url_override_allowed("http://127.0.0.1:8787/release_info.json", false));
+        assert!(feed_url_override_allowed("http://localhost:8787/release_info.json", false));
+        assert!(!feed_url_override_allowed("https://staging.example/release_info.json", false));
+        assert!(feed_url_override_allowed("https://staging.example/release_info.json", true));
+        assert!(!feed_url_override_allowed("http://attacker.example/release_info.json", true));
+    }
 
     /// GitHub, counting how often it's asked.
     #[derive(Default)]
