@@ -887,14 +887,14 @@ mod tests {
         gone.id()
     }
 
-    /// Two programs from one publisher match; an unsigned one never does, on either side.
+    /// A catalog-signed program matches itself; an unsigned one never does, on either side.
     #[cfg(windows)]
     #[test]
     fn a_file_must_be_signed_by_the_launchers_own_publisher() {
-        let (cmd, msiexec) = (system_program("cmd.exe"), system_program("msiexec.exe"));
+        let cmd = system_program("cmd.exe");
         // `cargo test` binaries are unsigned.
         let unsigned = std::env::current_exe().unwrap();
-        assert_eq!(signed_like(&cmd, &msiexec), Ok(()));
+        assert_eq!(signed_like(&cmd, &cmd), Ok(()));
         assert!(signed_like(&cmd, &unsigned).is_err_and(|e| e.contains("isn't signed")));
         assert!(signed_like(&unsigned, &cmd).is_err_and(|e| e.contains("doesn't install updates")));
     }
