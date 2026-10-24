@@ -5909,6 +5909,7 @@ name = "xtask"
 version = "0.7.0"
 dependencies = [
  "jiff",
+ "semver",
 ]
 
 [[package]]
