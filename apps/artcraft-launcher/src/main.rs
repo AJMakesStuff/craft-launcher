@@ -1001,12 +1001,14 @@ mod tests {
         // Setting the UI up asked for one immediate run.
         assert!(launcher.tick_in_tray().is_empty());
         let pause = Duration::from_millis(200);
+        // Before the spawn: the waker's pause starts there, and a busy machine can hold this thread
+        // back between the spawn and a later reading for long enough to fail the check below.
+        let started = Instant::now();
         let waking = std::thread::spawn(move || {
             std::thread::sleep(pause);
             let _ = show.send(single_instance::Request::Show);
             let _ = wake.try_send(());
         });
-        let started = Instant::now();
         assert!(launcher.wait_in_tray(&woken));
         assert!(started.elapsed() >= pause);
         // After the first run: once on the way in and once when woken. It slept in between.
