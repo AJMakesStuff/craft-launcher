@@ -206,7 +206,7 @@ impl FeedRelease {
             name: if self.name.is_empty() { self.tag.clone() } else { truncate(&self.name, 120) },
             tag: self.tag.clone(),
             published_at: self.published_at,
-            html_url: if self.html_url.starts_with(&releases_page) { self.html_url.clone() } else { format!("{releases_page}tag/{}", self.tag) },
+            html_url: release::safe_release_html_url(repo, &self.html_url).unwrap_or_else(|| format!("{releases_page}tag/{}", self.tag)),
             notes: truncate(&self.notes, 64 * 1024),
             prerelease: self.prerelease,
             assets,
