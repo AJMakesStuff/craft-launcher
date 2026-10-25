@@ -36,6 +36,8 @@ pub struct Http {
     feed: ureq::Agent,
     no_redirect: ureq::Agent,
     download: ureq::Agent,
+    direct: ureq::Agent,
+    direct_download: ureq::Agent,
     token: Option<String>,
 }
 
@@ -47,6 +49,15 @@ pub struct FeedError {
     pub throttled: bool,
     /// The server's `Retry-After`, in seconds.
     pub retry_after: Option<i64>,
+}
+
+/// `http://<loopback host>:<port>` and an optional path: the host must be exactly 127.0.0.1,
+/// localhost or [::1] (no `user@` in front of another host), with a numeric port.
+pub fn is_loopback(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else { return false };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let Some((host, port)) = authority.rsplit_once(':') else { return false };
+    matches!(host, "127.0.0.1" | "localhost" | "[::1]") && !port.is_empty() && port.parse::<u16>().is_ok()
 }
 
 impl Http {
@@ -95,10 +106,29 @@ impl Http {
             .user_agent(USER_AGENT)
             .build()
             .new_agent();
+        let direct = ureq::Agent::config_builder()
+            .proxy(None)
+            .tls_config(tls())
+            .timeout_connect(Some(Duration::from_secs(5)))
+            .timeout_global(Some(Duration::from_secs(20)))
+            .http_status_as_error(false)
+            .user_agent(USER_AGENT)
+            .build()
+            .new_agent();
+        let direct_download = ureq::Agent::config_builder()
+            .proxy(None)
+            .tls_config(tls())
+            .timeout_connect(Some(Duration::from_secs(20)))
+            .timeout_recv_response(Some(Duration::from_secs(60)))
+            .timeout_recv_body(Some(ATTEMPT_BODY_TIME))
+            .http_status_as_error(false)
+            .user_agent(USER_AGENT)
+            .build()
+            .new_agent();
         // An optional token raises GitHub's limit from 60 to 5000 requests an hour. Only ever sent
         // to api.github.com.
         let token = std::env::var("ARTCRAFT_LAUNCHER_GITHUB_TOKEN").ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
-        Ok(Self { small, feed, no_redirect, download, token })
+        Ok(Self { small, feed, no_redirect, download, direct, direct_download, token })
     }
 
     /// GET a GitHub API resource, revalidating with `etag` when given.
@@ -139,8 +169,9 @@ impl Http {
     /// ArtCraft's release feed, or why it couldn't be read. Never takes more than ~10 seconds.
     pub fn get_feed(&self, url: &str) -> Result<String, FeedError> {
         let failed = |why: String| FeedError { why, throttled: false, retry_after: None };
+        let agent = if is_loopback(url) { &self.direct } else { &self.feed };
         let mut resp =
-            self.feed.get(url).header("Accept", "application/json").call().map_err(|e| failed(format!("couldn't reach {} ({e})", host(url))))?;
+            agent.get(url).header("Accept", "application/json").call().map_err(|e| failed(format!("couldn't reach {} ({e})", host(url))))?;
         // Seconds only; an HTTP date falls back to our own backoff.
         let retry_after = resp.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|r| r.trim().parse::<i64>().ok());
         match resp.status().as_u16() {
@@ -151,7 +182,8 @@ impl Http {
 
     /// GET a small text file (following redirects).
     pub fn get_text(&self, url: &str) -> Result<Option<String>, String> {
-        let mut resp = self.small.get(url).call().map_err(|e| format!("couldn't reach {} ({e})", host(url)))?;
+        let agent = if is_loopback(url) { &self.direct } else { &self.small };
+        let mut resp = agent.get(url).call().map_err(|e| format!("couldn't reach {} ({e})", host(url)))?;
         match resp.status().as_u16() {
             200 => read_text_capped(&mut resp, MAX_SMALL).map(Some).map_err(|e| format!("unreadable answer ({e})")),
             404 => Ok(None),
@@ -163,7 +195,8 @@ impl Http {
     /// `max` bytes is refused: by its announced length before a byte is read, and by a hard limit
     /// on the body when the length wasn't announced or was wrong.
     pub fn get_bytes(&self, url: &str, max: usize) -> Result<Option<Vec<u8>>, String> {
-        let mut resp = self.small.get(url).call().map_err(|e| format!("couldn't reach {} ({e})", host(url)))?;
+        let agent = if is_loopback(url) { &self.direct } else { &self.small };
+        let mut resp = agent.get(url).call().map_err(|e| format!("couldn't reach {} ({e})", host(url)))?;
         match resp.status().as_u16() {
             200 => {
                 let announced = resp.headers().get("content-length").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
@@ -285,7 +318,8 @@ impl Http {
     fn attempt(&self, url: &str, part: &Path, have: u64, size: u64, stop: &Stop, progress: &mut dyn FnMut(Transfer)) -> Result<(), AttemptError> {
         let retry = |error: String, progressed: bool| AttemptError::Retry { error, progressed };
         // Binaries are already compressed; ask for the bytes exactly as published.
-        let mut req = self.download.get(url).header("Accept-Encoding", "identity");
+        let agent = if is_loopback(url) { &self.direct_download } else { &self.download };
+        let mut req = agent.get(url).header("Accept-Encoding", "identity");
         if have > 0 {
             req = req.header("Range", &format!("bytes={have}-"));
         }
