@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -592,28 +592,74 @@ fn serve(o: &Opts) -> Result<(), String> {
     Ok(())
 }
 
-fn handle(stream: TcpStream, mirror: &Path, base: &str) -> Result<(), String> {
-    let io = |e: std::io::Error| e.to_string();
-    // A single wall-clock deadline across the request line and every header: an idle or trickling
-    // client must not be able to hold a handler thread open indefinitely (CWE-770).
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-    let mut reader = BufReader::new(stream.try_clone().map_err(io)?);
-    let read_line_until = |reader: &mut BufReader<TcpStream>, buf: &mut String| -> Result<usize, String> {
+/// Maximum byte length for a single request line or header line (CWE-400, F-019).
+const MAX_LINE_BYTES: usize = 8 * 1024;
+/// Maximum byte length for all request headers combined (CWE-400, F-019).
+const MAX_HEADER_BYTES: usize = 64 * 1024;
+
+/// Sanitizes a string for safe terminal logging, escaping ASCII control characters
+/// and ANSI escape sequences to prevent terminal display manipulation (CWE-117, F-020, F-021).
+fn sanitize_for_terminal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii_control() || c == '\x1b' {
+            use std::fmt::Write;
+            let _ = write!(out, "\\x{:02x}", c as u32);
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Reads a line from `stream` enforcing per-byte deadlines and size bounds (CWE-400, F-019).
+fn read_line_bounded(stream: &mut TcpStream, deadline: std::time::Instant, total_read: &mut usize) -> Result<String, String> {
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        if line.len() >= MAX_LINE_BYTES || *total_read >= MAX_HEADER_BYTES {
+            return Err("request header size limit exceeded".into());
+        }
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
             return Err("request header deadline exceeded".into());
         }
-        reader.get_ref().set_read_timeout(Some(remaining)).map_err(io)?;
-        reader.read_line(buf).map_err(io)
-    };
-    let mut line = String::new();
-    read_line_until(&mut reader, &mut line)?;
+        stream.set_read_timeout(Some(remaining)).map_err(|e| e.to_string())?;
+        match stream.read(&mut byte) {
+            Ok(0) => break,
+            Ok(_) => {
+                *total_read += 1;
+                if byte[0] == b'\n' {
+                    break;
+                }
+                line.push(byte[0]);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+                return Err("request header deadline exceeded".into());
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    if line.ends_with(b"\r") {
+        line.pop();
+    }
+    String::from_utf8(line).map_err(|_| "request header contains invalid UTF-8".into())
+}
+
+fn handle(mut stream: TcpStream, mirror: &Path, base: &str) -> Result<(), String> {
+    let io = |e: std::io::Error| e.to_string();
+    // A single wall-clock deadline across the request line and every header: an idle or trickling
+    // client must not be able to hold a handler thread open indefinitely (CWE-770, CWE-400, F-019).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut total_read = 0;
+    let line = read_line_bounded(&mut stream, deadline, &mut total_read)?;
     let mut parts = line.split_whitespace();
     let (method, target) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
     let mut range_start: Option<u64> = None;
     loop {
-        let mut h = String::new();
-        if read_line_until(&mut reader, &mut h)? == 0 || h.trim().is_empty() {
+        let h = read_line_bounded(&mut stream, deadline, &mut total_read)?;
+        if h.is_empty() {
             break;
         }
         if let Some((k, v)) = h.split_once(':')
@@ -631,7 +677,8 @@ fn handle(stream: TcpStream, mirror: &Path, base: &str) -> Result<(), String> {
         return respond(&mut out, "405 Method Not Allowed", "text/plain", b"", head);
     }
     let path = target.split(['?', '#']).next().unwrap_or("").trim_start_matches('/');
-    eprintln!("{method} /{path}");
+    // Sanitize client-controlled method and path to prevent terminal escape injection (CWE-117, F-020, F-021).
+    eprintln!("{} /{}", sanitize_for_terminal(method), sanitize_for_terminal(path));
     if path == "release_info.json" {
         return respond(&mut out, "200 OK", "application/json", feed(mirror, base).as_bytes(), head);
     }
@@ -779,5 +826,43 @@ mod tests {
         for bad in ["", ".", "..", "a/b", "a\\b", "a%2e"] {
             assert!(!safe_name(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn terminal_sanitization_escapes_ansi_and_control_codes() {
+        assert_eq!(sanitize_for_terminal("GET"), "GET");
+        assert_eq!(sanitize_for_terminal("release_info.json"), "release_info.json");
+        // ANSI escape code
+        assert_eq!(sanitize_for_terminal("\x1b[2Jevil"), "\\x1b[2Jevil");
+        // CR / LF / Tab / Bell / Backspace
+        assert_eq!(sanitize_for_terminal("foo\r\nbar\t\x07\x08"), "foo\\x0d\\x0abar\\x09\\x07\\x08");
+    }
+
+    #[test]
+    fn read_line_bounded_enforces_limits() {
+        use std::net::{Ipv4Addr, TcpListener, TcpStream};
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let client = std::thread::spawn(move || {
+            let mut s = TcpStream::connect(addr).unwrap();
+            use std::io::Write;
+            s.write_all(b"GET /valid HTTP/1.1\r\n").unwrap();
+            // Send line exceeding MAX_LINE_BYTES
+            let big_line = vec![b'a'; MAX_LINE_BYTES + 10];
+            s.write_all(&big_line).unwrap();
+            s.write_all(b"\r\n").unwrap();
+        });
+
+        let (mut s, _) = listener.accept().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut total = 0;
+        let line1 = read_line_bounded(&mut s, deadline, &mut total);
+        assert_eq!(line1.unwrap(), "GET /valid HTTP/1.1");
+
+        let line2 = read_line_bounded(&mut s, deadline, &mut total);
+        assert!(line2.is_err(), "must reject oversized line (CWE-400)");
+
+        client.join().unwrap();
     }
 }
