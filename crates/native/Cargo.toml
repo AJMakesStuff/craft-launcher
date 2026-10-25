@@ -25,6 +25,7 @@ dirs = "6"
 getrandom = "0.3"
 tempfile = "3"
 sha2 = "0.10"
+subtle = "2"
 # HTTPS over rustls, with the OS verifying certificates (rustls-platform-verifier). No bundled
 # root list: webpki-roots and webpki-root-certs are CDLA-licensed.
 ureq = { version = "3.4", default-features = false, features = ["rustls-no-provider", "_ring", "gzip", "platform-verifier"] }
