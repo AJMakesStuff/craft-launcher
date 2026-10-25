@@ -280,7 +280,11 @@ pub fn hud_link(ui: &mut Ui, text: &str, url: &str) -> Response {
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Link, true, text));
     let resp = resp.on_hover_text(url).on_hover_cursor(egui::CursorIcon::PointingHand);
     if resp.clicked() {
-        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+        if artcraft_launcher_core::release::safe_web_link(url) {
+            ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+        } else {
+            log::warn!("refusing to open unsafe URL: {url}");
+        }
     }
     resp
 }
