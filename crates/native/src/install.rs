@@ -157,12 +157,13 @@ pub fn install_at(
 /// release). We require the version encoded in the asset filename and the release tag embedded in
 /// the download URL to agree with the release version before any bytes are fetched.
 pub(crate) fn bind_artifact_version(app: &CraftApp, release: &Release, asset: &Asset) -> Result<(), String> {
-    let Some(release_version) = release.version.as_ref() else { return Ok(()) };
     let mismatch = || format!("{}'s download does not match the advertised version {}.", app.name, release.version_label());
+    let release_version = release.version.as_ref();
 
     // The version in the asset filename (`<stem>-<version>-<os>-<arch>.<ext>`), when it carries one.
     let stems: Vec<&str> = app.stems().collect();
-    if let Some(parsed) = artcraft_launcher_core::platform::parse_asset_name(&asset.name, &stems)
+    if let Some(release_version) = release_version
+        && let Some(parsed) = artcraft_launcher_core::platform::parse_asset_name(&asset.name, &stems)
         && version::parse(&parsed.version).as_ref() != Some(release_version)
     {
         return Err(mismatch());
@@ -176,7 +177,9 @@ pub(crate) fn bind_artifact_version(app: &CraftApp, release: &Release, asset: &A
 
     // The release tag embedded in a GitHub download URL (`.../releases/download/<tag>/<name>`).
     if let Some(tag) = asset.url.split("/releases/download/").nth(1).and_then(|rest| rest.split('/').next())
-        && (tag.is_empty() || (tag != release.tag && version::parse(tag).as_ref() != Some(release_version)))
+        && (tag.is_empty()
+            || release_version
+                .map_or(tag != release.tag, |release_version| tag != release.tag && version::parse(tag).as_ref() != Some(release_version)))
     {
         return Err(mismatch());
     }
