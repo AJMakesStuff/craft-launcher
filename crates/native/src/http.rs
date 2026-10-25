@@ -37,6 +37,7 @@ pub struct Http {
     no_redirect: ureq::Agent,
     download: ureq::Agent,
     direct: ureq::Agent,
+    direct_download: ureq::Agent,
     token: Option<String>,
 }
 
@@ -106,6 +107,7 @@ impl Http {
             .build()
             .new_agent();
         let direct = ureq::Agent::config_builder()
+            .proxy(None)
             .tls_config(tls())
             .timeout_connect(Some(Duration::from_secs(5)))
             .timeout_global(Some(Duration::from_secs(20)))
@@ -113,10 +115,20 @@ impl Http {
             .user_agent(USER_AGENT)
             .build()
             .new_agent();
+        let direct_download = ureq::Agent::config_builder()
+            .proxy(None)
+            .tls_config(tls())
+            .timeout_connect(Some(Duration::from_secs(20)))
+            .timeout_recv_response(Some(Duration::from_secs(60)))
+            .timeout_recv_body(Some(ATTEMPT_BODY_TIME))
+            .http_status_as_error(false)
+            .user_agent(USER_AGENT)
+            .build()
+            .new_agent();
         // An optional token raises GitHub's limit from 60 to 5000 requests an hour. Only ever sent
         // to api.github.com.
         let token = std::env::var("ARTCRAFT_LAUNCHER_GITHUB_TOKEN").ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
-        Ok(Self { small, feed, no_redirect, download, direct, token })
+        Ok(Self { small, feed, no_redirect, download, direct, direct_download, token })
     }
 
     /// GET a GitHub API resource, revalidating with `etag` when given.
@@ -306,7 +318,7 @@ impl Http {
     fn attempt(&self, url: &str, part: &Path, have: u64, size: u64, stop: &Stop, progress: &mut dyn FnMut(Transfer)) -> Result<(), AttemptError> {
         let retry = |error: String, progressed: bool| AttemptError::Retry { error, progressed };
         // Binaries are already compressed; ask for the bytes exactly as published.
-        let agent = if is_loopback(url) { &self.direct } else { &self.download };
+        let agent = if is_loopback(url) { &self.direct_download } else { &self.download };
         let mut req = agent.get(url).header("Accept-Encoding", "identity");
         if have > 0 {
             req = req.header("Range", &format!("bytes={have}-"));

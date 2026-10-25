@@ -124,8 +124,14 @@ pub(crate) fn redact_credentials(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut remaining = text;
     while let Some(idx) = remaining.to_ascii_lowercase().find("bearer ") {
-        result.push_str(&remaining[..idx + 7]);
-        let token_rest = &remaining[idx + 7..];
+        let prefix_len = idx + 7;
+        result.push_str(&remaining[..prefix_len]);
+        let mut token_rest = &remaining[prefix_len..];
+        let spaces = token_rest.chars().take_while(|c| c.is_whitespace() && *c != '\r' && *c != '\n').count();
+        if spaces > 0 {
+            result.push_str(&token_rest[..spaces]);
+            token_rest = &token_rest[spaces..];
+        }
         let end_token = token_rest.find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == '\r' || c == '\n').unwrap_or(token_rest.len());
         result.push_str("[REDACTED]");
         remaining = &token_rest[end_token..];
@@ -352,6 +358,7 @@ mod tests {
     #[test]
     fn redact_credentials_replaces_bearer_tokens() {
         assert_eq!(redact_credentials("Authorization: Bearer ghp_secretToken1234567890"), "Authorization: Bearer [REDACTED]");
+        assert_eq!(redact_credentials("Authorization: Bearer  secret_double_space"), "Authorization: Bearer  [REDACTED]");
         assert_eq!(redact_credentials("header \"authorization: bearer my_secret\" and more"), "header \"authorization: bearer [REDACTED]\" and more");
         assert_eq!(redact_credentials("normal log line without tokens"), "normal log line without tokens");
     }
