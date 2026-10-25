@@ -127,10 +127,13 @@ pub(crate) fn redact_credentials(text: &str) -> String {
         let prefix_len = idx + 7;
         result.push_str(&remaining[..prefix_len]);
         let mut token_rest = &remaining[prefix_len..];
-        let spaces = token_rest.chars().take_while(|c| c.is_whitespace() && *c != '\r' && *c != '\n').count();
-        if spaces > 0 {
-            result.push_str(&token_rest[..spaces]);
-            token_rest = &token_rest[spaces..];
+        // Stop at the first byte that is not ordinary horizontal whitespace. `find` returns a
+        // byte index, so multi-byte Unicode whitespace (NBSP, em space, ideographic space) is
+        // copied whole instead of being cut at a non-char boundary.
+        let spaces_end = token_rest.find(|c: char| !(c.is_whitespace() && c != '\r' && c != '\n')).unwrap_or(token_rest.len());
+        if spaces_end > 0 {
+            result.push_str(&token_rest[..spaces_end]);
+            token_rest = &token_rest[spaces_end..];
         }
         let end_token = token_rest.find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == '\r' || c == '\n').unwrap_or(token_rest.len());
         result.push_str("[REDACTED]");
@@ -361,5 +364,14 @@ mod tests {
         assert_eq!(redact_credentials("Authorization: Bearer  secret_double_space"), "Authorization: Bearer  [REDACTED]");
         assert_eq!(redact_credentials("header \"authorization: bearer my_secret\" and more"), "header \"authorization: bearer [REDACTED]\" and more");
         assert_eq!(redact_credentials("normal log line without tokens"), "normal log line without tokens");
+    }
+
+    #[test]
+    fn redact_credentials_copies_unicode_whitespace_whole() {
+        // NBSP (U+00A0), em space (U+2003) and ideographic space (U+3000) are each multiple
+        // UTF-8 bytes; a character count must not be used as a byte slice index.
+        assert_eq!(redact_credentials("Authorization: Bearer \u{a0}secretToken"), "Authorization: Bearer \u{a0}[REDACTED]");
+        assert_eq!(redact_credentials("Bearer \u{2003}\u{3000}tok\u{a0}tail"), "Bearer \u{2003}\u{3000}[REDACTED]\u{a0}tail");
+        assert_eq!(redact_credentials("Bearer \u{a0}\u{a0}multi\u{2003}gap"), "Bearer \u{a0}\u{a0}[REDACTED]\u{2003}gap");
     }
 }
