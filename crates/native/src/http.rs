@@ -318,7 +318,8 @@ impl Http {
             return Err(AttemptError::Fatal(format!("unexpected Content-Encoding '{enc}' on binary artifact download")));
         }
         let limit = if total > 0 { total } else { MAX_DOWNLOAD };
-        if have > limit {
+        let appends = status == 206 && start == have;
+        if appends && have > limit {
             return Err(AttemptError::Fatal(format!("the download exceeds the permitted size of {limit} bytes")));
         }
         // Open the part file at the right place: a 200 restarts it, a 206 continues it.
