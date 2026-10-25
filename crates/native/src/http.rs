@@ -171,9 +171,9 @@ impl Http {
                 if announced.is_some_and(|n| n > max as u64) {
                     return Err(too_big());
                 }
-                // ureq errors once the limit is reached, so ask for one byte more than we accept.
-                let body = resp.body_mut().with_config().limit(max as u64 + 1).read_to_vec().map_err(|e| format!("unreadable answer ({e})"))?;
-                if body.len() > max { Err(too_big()) } else { Ok(Some(body)) }
+                let body = read_bytes_capped(&mut resp, max)
+                    .map_err(|e| if e.contains("larger than") { too_big() } else { format!("unreadable answer ({e})") })?;
+                Ok(Some(body))
             }
             404 => Ok(None),
             s => Err(format!("{} answered HTTP {s}", host(url))),
@@ -312,6 +312,16 @@ impl Http {
         if size > 0 && total != size {
             return Err(AttemptError::Fatal(format!("the server offered {total} bytes, but the release lists {size}")));
         }
+        if let Some(enc) = header("content-encoding")
+            && !enc.eq_ignore_ascii_case("identity")
+        {
+            return Err(AttemptError::Fatal(format!("unexpected Content-Encoding '{enc}' on binary artifact download")));
+        }
+        let limit = if total > 0 { total } else { MAX_DOWNLOAD };
+        let appends = status == 206 && start == have;
+        if appends && have > limit {
+            return Err(AttemptError::Fatal(format!("the download exceeds the permitted size of {limit} bytes")));
+        }
         // Open the part file at the right place: a 200 restarts it, a 206 continues it.
         let mut file = match (status, start) {
             (206, s) if s == have => std::fs::OpenOptions::new().append(true).open(part),
@@ -321,7 +331,7 @@ impl Http {
         let mut done = if status == 206 && start == have { have } else { 0 };
         // We check the length and checksum ourselves; the reader's limit is only a backstop
         // against an endless body. (ureq errors once the limit is *reached*, so leave headroom.)
-        let remaining = if total > 0 { total.saturating_sub(done) } else { MAX_DOWNLOAD };
+        let remaining = limit.saturating_sub(done);
         let mut reader = resp.body_mut().with_config().limit(remaining.saturating_add(1 << 20)).reader();
         let mut buf = vec![0u8; 256 * 1024];
         let at_start = done;
@@ -338,12 +348,13 @@ impl Http {
             if n == 0 {
                 break;
             }
+            let next_done = done.saturating_add(n as u64);
+            if next_done > limit {
+                return Err(AttemptError::Fatal(format!("the server sent more than the permitted size of {limit} bytes")));
+            }
             let chunk = buf.get(..n).ok_or_else(|| AttemptError::Fatal("read past the buffer".into()))?;
             file.write_all(chunk).map_err(|e| AttemptError::Fatal(format!("couldn't save the download ({e}). Is the disk full?")))?;
-            done = done.saturating_add(n as u64);
-            if total > 0 && done > total {
-                return Err(retry("the server sent more than the file's size".into(), false));
-            }
+            done = next_done;
             progress(Transfer::Bytes { done, total });
         }
         file.sync_all().map_err(|e| AttemptError::Fatal(format!("couldn't save the download ({e})")))?;
@@ -563,6 +574,17 @@ fn read_text_capped(resp: &mut ureq::http::Response<ureq::Body>, max: u64) -> Re
         return Err(format!("the answer is larger than {max} bytes"));
     }
     Ok(text)
+}
+
+/// Reads a binary body, rejecting one whose decoded size exceeds `max` (CWE-409).
+fn read_bytes_capped(resp: &mut ureq::http::Response<ureq::Body>, max: usize) -> Result<Vec<u8>, String> {
+    let mut reader = resp.body_mut().with_config().reader().take((max as u64).saturating_add(1));
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    if bytes.len() > max {
+        return Err(format!("the answer is larger than {max} bytes"));
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -1032,5 +1054,26 @@ pub(crate) mod tests {
     #[test]
     fn partial_files_are_named_after_the_file_and_size() {
         assert_eq!(part_path(Path::new("/d/photocraft.dmg"), 9), Path::new("/d/photocraft.dmg.9.part"));
+    }
+
+    #[test]
+    fn get_bytes_rejects_oversized_payload() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else { return };
+            let mut line = String::new();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            while reader.read_line(&mut line).unwrap_or(0) > 0 && line != "\r\n" {
+                line.clear();
+            }
+            let body = vec![b'A'; 200];
+            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 200\r\nConnection: close\r\n\r\n");
+            let _ = stream.write_all(&body);
+        });
+        let http = Http::new().unwrap();
+        let result = http.get_bytes(&format!("http://127.0.0.1:{port}/test.bin"), 100);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("more than 100 bytes"));
     }
 }
