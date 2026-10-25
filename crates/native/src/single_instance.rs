@@ -445,8 +445,7 @@ mod tests {
             // Rogue server sends fake challenge with forged proof
             let _ = stream.write_all(b"artcraft-launcher:challenge fake-nonce forged-proof\n");
             let mut next = [0u8; 128];
-            let n = stream.read(&mut next).unwrap_or(0);
-            n
+            stream.read(&mut next).unwrap_or(0)
         });
 
         let ans = ask(addr, Some(&v("0.1.2")), Some(TOK)).unwrap();
