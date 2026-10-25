@@ -173,11 +173,14 @@ fn compute_proof(role: &str, token: &str, client_nonce: &str, server_nonce: &str
 }
 
 fn constant_time_eq(a: &str, b: &str) -> bool {
-    use subtle::ConstantTimeEq;
     if a.len() != b.len() {
         return false;
     }
-    a.as_bytes().ct_eq(b.as_bytes()).into()
+    let mut diff = 0u8;
+    for (&x, &y) in a.as_bytes().iter().zip(b.as_bytes()) {
+        diff |= x ^ y;
+    }
+    core::hint::black_box(diff) == 0
 }
 
 /// Answers other starts on `listener` until the receiver is dropped.
