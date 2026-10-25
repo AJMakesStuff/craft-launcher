@@ -169,19 +169,20 @@ pub(crate) fn bind_artifact_version(app: &CraftApp, release: &Release, asset: &A
         return Err(mismatch());
     }
 
-    // The filename in the download URL must match asset.name (CWE-494).
-    let url_filename = asset.url.split(['/', '?', '#']).rfind(|s| !s.is_empty()).unwrap_or("");
-    if !url_filename.is_empty() && url_filename != asset.name {
-        return Err(format!("{}'s download URL filename does not match selected asset {}.", app.name, asset.name));
-    }
-
-    // The release tag embedded in a GitHub download URL (`.../releases/download/<tag>/<name>`).
-    if let Some(tag) = asset.url.split("/releases/download/").nth(1).and_then(|rest| rest.split('/').next())
-        && (tag.is_empty()
+    // The release tag and filename embedded in a release download URL (`.../releases/download/<tag>/<name>`).
+    if let Some(rest) = asset.url.split("/releases/download/").nth(1) {
+        let mut parts = rest.split('/');
+        let tag = parts.next().unwrap_or("");
+        let url_filename = parts.next().unwrap_or("");
+        if tag.is_empty()
             || release_version
-                .map_or(tag != release.tag, |release_version| tag != release.tag && version::parse(tag).as_ref() != Some(release_version)))
-    {
-        return Err(mismatch());
+                .map_or(tag != release.tag, |release_version| tag != release.tag && version::parse(tag).as_ref() != Some(release_version))
+        {
+            return Err(mismatch());
+        }
+        if !url_filename.is_empty() && url_filename != asset.name {
+            return Err(format!("{}'s download URL filename does not match selected asset {}.", app.name, asset.name));
+        }
     }
     Ok(())
 }
