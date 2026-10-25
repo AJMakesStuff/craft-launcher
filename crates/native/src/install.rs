@@ -658,7 +658,7 @@ fn swap_into_place_via(staged: &Path, dest: &Path, rename: impl Fn(&Path, &Path)
 fn single_top_folder(dir: &Path) -> Result<PathBuf, String> {
     let entries: Vec<_> = std::fs::read_dir(dir).map_err(|e| e.to_string())?.flatten().collect();
     match entries.as_slice() {
-        [only] if only.path().is_dir() => Ok(only.path()),
+        [only] if only.file_type().is_ok_and(|ft| ft.is_dir() && !ft.is_symlink()) => Ok(only.path()),
         _ => Ok(dir.to_path_buf()),
     }
 }
@@ -1030,6 +1030,16 @@ pub(crate) mod linux {
 
     fn unpack_tree(app: &CraftApp, file: &Path, staged: &Path, paths: &Paths) -> Result<PathBuf, String> {
         let tree = tree::unpack(app, file, staged)?;
+        // Verify tree root is strictly within staged and is not a symlink (CWE-59).
+        let rel_tree = tree.strip_prefix(staged).map_err(|_| "staging layout escapes staging".to_string())?;
+        let mut check_root = staged.to_path_buf();
+        for part in rel_tree.components() {
+            check_root.push(part);
+            let meta = std::fs::symlink_metadata(&check_root).map_err(|e| format!("couldn't check {} ({e})", check_root.display()))?;
+            if meta.file_type().is_symlink() {
+                return Err("unpacked tree root is a symlink".into());
+            }
+        }
         // Validate the staged binary and set its mode *before* either swap: a rejected update
         // (e.g. a symlinked app binary) must never disturb the installed tree it replaces.
         let staged_bin = tree.join("bin").join(app.id);
@@ -1053,6 +1063,10 @@ pub(crate) mod linux {
     /// before changing permissions, so the chmod can only ever reach a regular file that lives at
     /// the verified path inside the launcher's own apps folder.
     fn make_runnable_within(root: &Path, bin: &Path) -> Result<(), String> {
+        let root_meta = std::fs::symlink_metadata(root).map_err(|e| format!("couldn't check {} ({e})", root.display()))?;
+        if root_meta.file_type().is_symlink() {
+            return Err("the install tree root is a symlink".into());
+        }
         // No component between `root` and `bin` may be a symlink.
         let rel = bin.strip_prefix(root).map_err(|_| "the app binary isn't inside the install tree".to_string())?;
         let mut here = root.to_path_buf();
@@ -1412,14 +1426,40 @@ mod tree {
         let gz = std::fs::File::open(file).map_err(|e| e.to_string())?;
         let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(gz));
         archive.set_preserve_permissions(true);
-        // `unpack` refuses entries that would land outside `staging` (`..`, absolute paths).
-        archive.unpack(staging).map_err(|e| format!("couldn't unpack the download ({e})"))?;
+        // Bound entry count and cumulative unpacked bytes to prevent decompression bombs (CWE-409).
+        const MAX_ENTRIES: usize = 50_000;
+        const MAX_UNPACKED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+        let mut entry_count = 0;
+        let mut total_unpacked = 0u64;
+        let entries = archive.entries().map_err(|e| format!("couldn't read archive entries ({e})"))?;
+        for entry in entries {
+            let mut entry = entry.map_err(|e| format!("invalid tar entry ({e})"))?;
+            entry_count += 1;
+            if entry_count > MAX_ENTRIES {
+                return Err("archive has too many entries".into());
+            }
+            let size = entry.header().size().unwrap_or(0);
+            total_unpacked = total_unpacked.saturating_add(size);
+            if total_unpacked > MAX_UNPACKED_BYTES {
+                return Err("archive exceeds maximum unpacked size".into());
+            }
+            entry.unpack_in(staging).map_err(|e| format!("couldn't unpack archive entry ({e})"))?;
+        }
         let top = single_top_folder(staging)?;
         if top.join("bin").join(app.id).is_file() {
             return Ok(top);
         }
         // Flat layout: put each file where /usr/local keeps it.
+        // Ensure tree is a fresh directory and not an archive-created symlink or directory (CWE-59).
         let tree = staging.join("tree");
+        if let Ok(m) = std::fs::symlink_metadata(&tree) {
+            if m.file_type().is_symlink() || !m.is_dir() {
+                let _ = std::fs::remove_file(&tree);
+            } else {
+                let _ = std::fs::remove_dir_all(&tree);
+            }
+        }
+        std::fs::create_dir_all(&tree).map_err(|e| e.to_string())?;
         let id = app.bundle_id();
         for (from, to) in [
             (top.join(app.id), tree.join("bin").join(app.id)),
@@ -1427,8 +1467,18 @@ mod tree {
             (top.join(format!("{id}.desktop")), tree.join("share/applications").join(format!("{id}.desktop"))),
             (top.join(format!("{id}.png")), tree.join("share/pixmaps").join(format!("{id}.png"))),
         ] {
-            if from.is_file() {
+            if std::fs::symlink_metadata(&from).is_ok_and(|m| m.file_type().is_file()) {
                 if let Some(dir) = to.parent() {
+                    let rel = dir.strip_prefix(&tree).map_err(|_| "destination escapes staging tree".to_string())?;
+                    let mut check = tree.clone();
+                    for part in rel.components() {
+                        check.push(part);
+                        if let Ok(m) = std::fs::symlink_metadata(&check)
+                            && m.file_type().is_symlink()
+                        {
+                            return Err("destination parent directory is a symlink".into());
+                        }
+                    }
                     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
                 }
                 std::fs::rename(&from, &to).map_err(|e| e.to_string())?;
@@ -1440,16 +1490,29 @@ mod tree {
         Ok(tree)
     }
 
-    /// Every file under `root`, relative to it.
+    /// Every file under `root`, relative to it. Does not descend through symlinks (CWE-59, CWE-400).
     pub fn files(root: &Path) -> Vec<PathBuf> {
         let mut out = Vec::new();
         let mut stack = vec![root.to_path_buf()];
+        let mut visited = 0;
+        const MAX_FILES: usize = 50_000;
         while let Some(dir) = stack.pop() {
-            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                visited += 1;
+                if visited > MAX_FILES {
+                    break;
+                }
+                let Ok(ft) = entry.file_type() else { continue };
                 let p = entry.path();
-                if p.is_dir() {
+                if ft.is_dir() && !ft.is_symlink() {
                     stack.push(p);
-                } else if let Ok(rel) = p.strip_prefix(root) {
+                } else if !ft.is_symlink()
+                    && let Ok(rel) = p.strip_prefix(root)
+                {
                     out.push(rel.to_path_buf());
                 }
             }
@@ -1515,6 +1578,23 @@ mod freebsd {
     pub fn remove_files(files: &[PathBuf], needs_root: bool) -> Result<(), String> {
         if files.is_empty() {
             return Err("the launcher has no record of these files".into());
+        }
+        for f in files {
+            // Refuse paths that climb or escape /usr/local, or contain symlink ancestors (CWE-59).
+            if !f.starts_with("/usr/local") || f.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+                return Err(format!("refusing to remove file outside install prefix: {}", f.display()));
+            }
+            if let Ok(rel) = f.strip_prefix("/usr/local") {
+                let mut check = PathBuf::from("/usr/local");
+                for part in rel.components() {
+                    if let Ok(meta) = std::fs::symlink_metadata(&check)
+                        && meta.file_type().is_symlink()
+                    {
+                        return Err(format!("refusing to remove path with symlink ancestor: {}", f.display()));
+                    }
+                    check.push(part);
+                }
+            }
         }
         if needs_root {
             let mut args: Vec<&OsStr> = vec![OsStr::new("/bin/rm"), OsStr::new("-f"), OsStr::new("--")];
@@ -2034,6 +2114,37 @@ mod tests {
         let bad = dir.path().join("bad.tar.gz");
         tarball(&bad, &["x/README.md"]);
         assert!(tree::unpack(app, &bad, &dir.path().join("staging")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tree_files_does_not_traverse_directory_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let external = dir.path().join("external");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(root.join("regular.txt"), b"hi").unwrap();
+        std::fs::write(external.join("secret.txt"), b"secret").unwrap();
+        std::os::unix::fs::symlink(&external, root.join("link_to_external")).unwrap();
+
+        let list = tree::files(&root);
+        assert_eq!(list, vec![PathBuf::from("regular.txt")]);
+    }
+
+    #[test]
+    fn single_top_folder_rejects_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_dir = dir.path().join("real");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        let staging = dir.path().join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&real_dir, staging.join("symlink_dir")).unwrap();
+            let res = single_top_folder(&staging).unwrap();
+            assert_eq!(res, staging, "a directory symlink must not be chosen as top folder");
+        }
     }
 
     #[cfg(target_os = "linux")]
