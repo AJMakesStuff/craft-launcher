@@ -1431,6 +1431,7 @@ mod tree {
         const MAX_UNPACKED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
         let mut entry_count = 0;
         let mut total_unpacked = 0u64;
+        let mut directories = Vec::new();
         let entries = archive.entries().map_err(|e| format!("couldn't read archive entries ({e})"))?;
         for entry in entries {
             let mut entry = entry.map_err(|e| format!("invalid tar entry ({e})"))?;
@@ -1438,12 +1439,21 @@ mod tree {
             if entry_count > MAX_ENTRIES {
                 return Err("archive has too many entries".into());
             }
-            let size = entry.header().size().unwrap_or(0);
+            let size = entry.size();
             total_unpacked = total_unpacked.saturating_add(size);
             if total_unpacked > MAX_UNPACKED_BYTES {
                 return Err("archive exceeds maximum unpacked size".into());
             }
-            entry.unpack_in(staging).map_err(|e| format!("couldn't unpack archive entry ({e})"))?;
+            if entry.header().entry_type().is_dir() {
+                directories.push(entry);
+            } else {
+                entry.unpack_in(staging).map_err(|e| format!("couldn't unpack archive entry ({e})"))?;
+            }
+        }
+        // Delay directory entries until child entries are written so restrictive modes do not break child extraction.
+        directories.sort_by(|a, b| b.path_bytes().cmp(&a.path_bytes()));
+        for mut dir in directories {
+            dir.unpack_in(staging).map_err(|e| format!("couldn't unpack archive directory ({e})"))?;
         }
         let top = single_top_folder(staging)?;
         if top.join("bin").join(app.id).is_file() {
@@ -1491,34 +1501,31 @@ mod tree {
     }
 
     /// Every file under `root`, relative to it. Does not descend through symlinks (CWE-59, CWE-400).
-    pub fn files(root: &Path) -> Vec<PathBuf> {
+    pub fn files(root: &Path) -> Result<Vec<PathBuf>, String> {
         let mut out = Vec::new();
         let mut stack = vec![root.to_path_buf()];
         let mut visited = 0;
         const MAX_FILES: usize = 50_000;
         while let Some(dir) = stack.pop() {
-            let entries = match std::fs::read_dir(&dir) {
-                Ok(entries) => entries,
-                Err(_) => continue,
-            };
-            for entry in entries.flatten() {
+            let entries = std::fs::read_dir(&dir).map_err(|e| format!("couldn't read directory {}: {e}", dir.display()))?;
+            for entry in entries {
+                let entry = entry.map_err(|e| format!("couldn't read directory entry: {e}"))?;
                 visited += 1;
                 if visited > MAX_FILES {
-                    break;
+                    return Err("directory tree exceeds maximum file limit of 50,000".into());
                 }
-                let Ok(ft) = entry.file_type() else { continue };
+                let ft = entry.file_type().map_err(|e| format!("couldn't read file type: {e}"))?;
                 let p = entry.path();
                 if ft.is_dir() && !ft.is_symlink() {
                     stack.push(p);
-                } else if !ft.is_symlink()
-                    && let Ok(rel) = p.strip_prefix(root)
-                {
+                } else if !ft.is_symlink() {
+                    let rel = p.strip_prefix(root).map_err(|e| e.to_string())?;
                     out.push(rel.to_path_buf());
                 }
             }
         }
         out.sort();
-        out
+        Ok(out)
     }
 }
 
@@ -1540,7 +1547,7 @@ mod freebsd {
 
     fn install_from(app: &CraftApp, file: &Path, staging: &Path) -> Result<(PathBuf, Vec<PathBuf>, bool), String> {
         let tree = tree::unpack(app, file, staging)?;
-        let rel = tree::files(&tree);
+        let rel = tree::files(&tree)?;
         let mut source = tree.into_os_string();
         source.push("/.");
         if pkexec().is_some() {
@@ -1579,13 +1586,14 @@ mod freebsd {
         if files.is_empty() {
             return Err("the launcher has no record of these files".into());
         }
+        let prefix = if needs_root { PathBuf::from("/usr/local") } else { dirs::home_dir().ok_or("no home folder")?.join(".local") };
         for f in files {
-            // Refuse paths that climb or escape /usr/local, or contain symlink ancestors (CWE-59).
-            if !f.starts_with("/usr/local") || f.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+            // Refuse paths that climb or escape install prefix, or contain symlink ancestors (CWE-59).
+            if !f.starts_with(&prefix) || f.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
                 return Err(format!("refusing to remove file outside install prefix: {}", f.display()));
             }
-            if let Ok(rel) = f.strip_prefix("/usr/local") {
-                let mut check = PathBuf::from("/usr/local");
+            if let Ok(rel) = f.strip_prefix(&prefix) {
+                let mut check = prefix.clone();
                 for part in rel.components() {
                     if let Ok(meta) = std::fs::symlink_metadata(&check)
                         && meta.file_type().is_symlink()
@@ -2106,7 +2114,7 @@ mod tests {
         );
         for file in [tree_style, flat_style] {
             let root = tree::unpack(app, &file, &dir.path().join("staging")).unwrap();
-            let files = tree::files(&root);
+            let files = tree::files(&root).unwrap();
             assert!(files.contains(&PathBuf::from("bin/wordcraft")), "{files:?}");
             assert!(files.contains(&PathBuf::from("share/applications/ai.storyteller.wordcraft.desktop")), "{files:?}");
             assert!(!files.iter().any(|f| f.ends_with("README.md")), "{files:?}");
@@ -2128,7 +2136,7 @@ mod tests {
         std::fs::write(external.join("secret.txt"), b"secret").unwrap();
         std::os::unix::fs::symlink(&external, root.join("link_to_external")).unwrap();
 
-        let list = tree::files(&root);
+        let list = tree::files(&root).unwrap();
         assert_eq!(list, vec![PathBuf::from("regular.txt")]);
     }
 
