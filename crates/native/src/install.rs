@@ -1518,7 +1518,7 @@ mod tree {
                 let p = entry.path();
                 if ft.is_dir() && !ft.is_symlink() {
                     stack.push(p);
-                } else if !ft.is_symlink() {
+                } else {
                     let rel = p.strip_prefix(root).map_err(|e| e.to_string())?;
                     out.push(rel.to_path_buf());
                 }
@@ -2137,7 +2137,7 @@ mod tests {
         std::os::unix::fs::symlink(&external, root.join("link_to_external")).unwrap();
 
         let list = tree::files(&root).unwrap();
-        assert_eq!(list, vec![PathBuf::from("regular.txt")]);
+        assert_eq!(list, vec![PathBuf::from("link_to_external"), PathBuf::from("regular.txt")]);
     }
 
     #[test]
