@@ -103,7 +103,13 @@ pub fn install_at(
                 .map(|path| Some(record(&version, kind, path, Vec::new(), false)))
         }
         #[cfg(windows)]
-        PackageKind::Msi => windows::run_msi(&file, destination.as_deref(), job.stop, &mut *job.phase).map(|_| None),
+        PackageKind::Msi => {
+            // An update lands in the same Windows Installer context as the copy being replaced:
+            // per-machine needs elevation, per-user must not duplicate itself per-machine. A
+            // fresh install passes no context and takes the package's own default.
+            let scope = existing.and_then(|inst| inst.package.as_deref()).and_then(crate::detect::windows::msi_scope);
+            windows::run_msi(&file, destination.as_deref(), scope, job.stop, &mut *job.phase).map(|_| None)
+        }
         #[cfg(windows)]
         PackageKind::PortableZip => {
             crate::portable::install(app, &file, &version, previous, job.paths, destination.as_deref(), job.replace, &mut |record| {
@@ -279,6 +285,35 @@ fn msi_folder_argument(path: &Path) -> Result<String, String> {
         return Err(format!("couldn't use install folder {value}: the path contains invalid characters"));
     }
     Ok(format!("INSTALLFOLDER=\"{value}\""))
+}
+
+/// The Windows Installer context an update must keep. A per-machine install elevates and writes
+/// HKLM registrations; a per-user one must not silently become a second, per-machine copy (or
+/// the other way round). A fresh install passes `None` and takes the package's own default,
+/// which is per-user for a dual-scope package.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MsiScope {
+    PerUser,
+    PerMachine,
+}
+
+/// The `msiexec` properties that ask a dual-scope package for `scope`. Passing the context
+/// explicitly on every update also keeps a per-machine update working when the package's own
+/// default has since changed.
+///
+/// `ALLUSERS=1` is what the current per-machine-only packages already set themselves, so it
+/// changes nothing for them; `ALLUSERS=2` with `MSIINSTALLPERUSER=1` is the documented
+/// single-package way to request a per-user install of a dual-scope package. A per-user
+/// registered copy can only come from a dual-scope package, so its updates can safely ask for
+/// one.
+#[cfg(any(windows, test))]
+fn msi_scope_arguments(scope: Option<MsiScope>) -> Vec<&'static str> {
+    match scope {
+        Some(MsiScope::PerUser) => vec!["ALLUSERS=2", "MSIINSTALLPERUSER=1"],
+        Some(MsiScope::PerMachine) => vec!["ALLUSERS=1"],
+        None => Vec::new(),
+    }
 }
 
 /// Where `asset` is downloaded to (and its partial file kept while unfinished).
@@ -1679,7 +1714,10 @@ pub(crate) fn msi_path(msi: &Path) -> Result<PathBuf, String> {
 pub mod windows {
     use artcraft_launcher_core::protocol::CANCELLED;
 
-    use super::{CraftApp, INSTALLER, JobPhase, Path, PathBuf, Stop, cancelled, msi_command, msi_folder_argument, msi_log, process, turn};
+    use super::{
+        CraftApp, INSTALLER, JobPhase, MsiScope, Path, PathBuf, Stop, cancelled, msi_command, msi_folder_argument, msi_log, msi_scope_arguments,
+        process, turn,
+    };
 
     fn msiexec() -> PathBuf {
         std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from).join(r"System32\msiexec.exe")
@@ -1697,12 +1735,23 @@ pub mod windows {
     }
 
     /// Runs an MSI with a progress window and no restart. Windows asks for permission itself.
-    pub fn run_msi(msi: &Path, destination: Option<&Path>, stop: &Stop, phase: &mut dyn FnMut(JobPhase)) -> Result<(), String> {
+    /// `scope`, from the copy being replaced's registration, keeps the update in the same
+    /// Windows Installer context (see [`MsiScope`]).
+    pub fn run_msi(
+        msi: &Path,
+        destination: Option<&Path>,
+        scope: Option<MsiScope>,
+        stop: &Stop,
+        phase: &mut dyn FnMut(JobPhase),
+    ) -> Result<(), String> {
         in_turn(stop, phase, JobPhase::Installing, || {
             use std::os::windows::process::CommandExt;
             let mut command = msi_command(&msiexec(), msi)?;
             if let Some(dir) = destination {
                 command.raw_arg(msi_folder_argument(dir)?);
+            }
+            for argument in msi_scope_arguments(scope) {
+                command.raw_arg(argument);
             }
             let status = command.status().map_err(|e| format!("couldn't start the Windows Installer ({e})"))?;
             explain(status.code()).map_err(|e| match status.code() {
@@ -1856,6 +1905,19 @@ mod tests {
         }
         assert!(msi_folder_argument(Path::new("D:\\bad\" TRANSFORMS=evil")).is_err());
         assert!(msi_folder_argument(Path::new("D:\\bad\nfolder")).is_err());
+    }
+
+    #[test]
+    fn msi_updates_keep_the_registered_context_and_new_installs_send_no_scope() {
+        // A fresh install passes nothing: the package's own default (per-user for a dual-scope
+        // package) applies, and an older per-machine-only package keeps behaving exactly as
+        // before.
+        assert_eq!(msi_scope_arguments(None), Vec::<&str>::new());
+        // A per-user update asks for the documented single-package per-user install...
+        assert_eq!(msi_scope_arguments(Some(MsiScope::PerUser)), vec!["ALLUSERS=2", "MSIINSTALLPERUSER=1"]);
+        // ...and a per-machine update asks for what per-machine-only packages already set
+        // themselves, so it changes nothing for the current releases.
+        assert_eq!(msi_scope_arguments(Some(MsiScope::PerMachine)), vec!["ALLUSERS=1"]);
     }
 
     #[cfg(target_os = "linux")]

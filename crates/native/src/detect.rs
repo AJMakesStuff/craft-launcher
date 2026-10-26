@@ -238,20 +238,27 @@ pub mod windows {
     }
 
     /// The folder the app's MSI remembers for its next upgrade, which is where it went when the
-    /// launcher chose the folder.
+    /// launcher chose the folder. Per-machine installs record it under HKLM, per-user installs
+    /// (dual-scope packages) under HKCU.
     fn install_dir(app: &CraftApp) -> Option<PathBuf> {
-        [KEY_WOW64_64KEY, KEY_WOW64_32KEY].into_iter().find_map(|flags| {
-            let key = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey_with_flags(format!(r"SOFTWARE\{}", app.name), KEY_READ | flags).ok()?;
-            key.get_value::<String, _>("InstallDir").ok().filter(|d| !d.is_empty()).map(PathBuf::from)
-        })
+        for (hive, flags) in [(HKEY_LOCAL_MACHINE, KEY_WOW64_64KEY), (HKEY_LOCAL_MACHINE, KEY_WOW64_32KEY), (HKEY_CURRENT_USER, 0)] {
+            if let Ok(key) = RegKey::predef(hive).open_subkey_with_flags(format!(r"SOFTWARE\{}", app.name), KEY_READ | flags)
+                && let Ok(dir) = key.get_value::<String, _>("InstallDir")
+                && !dir.is_empty()
+            {
+                return Some(PathBuf::from(dir));
+            }
+        }
+        None
     }
 
-    /// The app's exe: from `App Paths`, the install folder, or Program Files.
+    /// The app's exe: from `App Paths` (per-machine under HKLM, per-user under HKCU), the install
+    /// folder, or Program Files.
     fn exe_path(app: &CraftApp, location: Option<PathBuf>) -> Option<PathBuf> {
         for stem in app.stems() {
             let app_paths = format!(r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{stem}.exe");
-            for flags in [KEY_WOW64_64KEY, KEY_WOW64_32KEY] {
-                if let Ok(key) = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey_with_flags(&app_paths, KEY_READ | flags)
+            for (hive, flags) in [(HKEY_LOCAL_MACHINE, KEY_WOW64_64KEY), (HKEY_LOCAL_MACHINE, KEY_WOW64_32KEY), (HKEY_CURRENT_USER, 0)] {
+                if let Ok(key) = RegKey::predef(hive).open_subkey_with_flags(&app_paths, KEY_READ | flags)
                     && let Ok(path) = key.get_value::<String, _>("")
                 {
                     let p = PathBuf::from(path.trim_matches('"'));
@@ -267,7 +274,28 @@ pub mod windows {
                 roots.push(PathBuf::from(pf));
             }
         }
+        // Per-user installs (dual-scope packages) live in the user's own Programs folder.
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            let programs = PathBuf::from(local).join("Programs");
+            if !roots.contains(&programs) {
+                roots.push(programs);
+            }
+        }
         exe_candidates(app, location.as_deref(), &roots).into_iter().find(|p| p.exists())
+    }
+
+    /// Which Windows Installer context `product_code` is registered in. An update must ask for
+    /// the same context: a per-machine one elevates and writes HKLM registrations, and a per-user
+    /// one must not silently become a second, per-machine copy (or the other way round). The
+    /// per-machine hives are checked first to agree with [`msi_installs`]' preference when both
+    /// somehow hold the same product code.
+    pub fn msi_scope(product_code: &str) -> Option<crate::install::MsiScope> {
+        for (hive, flags) in [(HKEY_LOCAL_MACHINE, KEY_WOW64_64KEY), (HKEY_LOCAL_MACHINE, KEY_WOW64_32KEY), (HKEY_CURRENT_USER, 0)] {
+            if RegKey::predef(hive).open_subkey_with_flags(format!(r"{UNINSTALL}\{product_code}"), KEY_READ | flags).is_ok() {
+                return Some(if hive == HKEY_LOCAL_MACHINE { crate::install::MsiScope::PerMachine } else { crate::install::MsiScope::PerUser });
+            }
+        }
+        None
     }
 
     pub fn detect(app: &CraftApp) -> Option<Installed> {
