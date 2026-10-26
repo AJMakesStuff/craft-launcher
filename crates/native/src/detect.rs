@@ -216,6 +216,10 @@ pub mod windows {
         for (hive, flags) in [(HKEY_LOCAL_MACHINE, KEY_WOW64_64KEY), (HKEY_LOCAL_MACHINE, KEY_WOW64_32KEY), (HKEY_CURRENT_USER, 0)] {
             let Ok(root) = RegKey::predef(hive).open_subkey_with_flags(UNINSTALL, KEY_READ | flags) else { continue };
             for code in root.enum_keys().flatten() {
+                // App-authored uninstall rows are not MSI product identities.
+                if !crate::msi_context::valid_product_code(&code) {
+                    continue;
+                }
                 let Ok(key) = root.open_subkey_with_flags(&code, KEY_READ | flags) else { continue };
                 let name: String = key.get_value("DisplayName").unwrap_or_default();
                 let publisher: String = key.get_value("Publisher").unwrap_or_default();
@@ -282,20 +286,6 @@ pub mod windows {
             }
         }
         exe_candidates(app, location.as_deref(), &roots).into_iter().find(|p| p.exists())
-    }
-
-    /// Which Windows Installer context `product_code` is registered in. An update must ask for
-    /// the same context: a per-machine one elevates and writes HKLM registrations, and a per-user
-    /// one must not silently become a second, per-machine copy (or the other way round). The
-    /// per-machine hives are checked first to agree with [`msi_installs`]' preference when both
-    /// somehow hold the same product code.
-    pub fn msi_scope(product_code: &str) -> Option<crate::install::MsiScope> {
-        for (hive, flags) in [(HKEY_LOCAL_MACHINE, KEY_WOW64_64KEY), (HKEY_LOCAL_MACHINE, KEY_WOW64_32KEY), (HKEY_CURRENT_USER, 0)] {
-            if RegKey::predef(hive).open_subkey_with_flags(format!(r"{UNINSTALL}\{product_code}"), KEY_READ | flags).is_ok() {
-                return Some(if hive == HKEY_LOCAL_MACHINE { crate::install::MsiScope::PerMachine } else { crate::install::MsiScope::PerUser });
-            }
-        }
-        None
     }
 
     pub fn detect(app: &CraftApp) -> Option<Installed> {

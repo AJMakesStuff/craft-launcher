@@ -90,6 +90,16 @@ pub fn install_at(
         return Err(format!("Cannot update {} to {}: installed version {} is newer", app.name, release.version_label(), inst_v));
     }
     log::info!("{}: starting {} to {} ({})", app.name, if existing.is_some() { "update" } else { "install" }, release.version_label(), kind.label());
+    #[cfg(windows)]
+    let msi_scope = if kind == PackageKind::Msi {
+        crate::msi_context::update_scope(
+            existing.is_some_and(|inst| inst.source == InstallSource::Msi),
+            existing.and_then(|inst| inst.package.as_deref()),
+            crate::msi_context::probe,
+        )?
+    } else {
+        None
+    };
     let file = download(release, asset, job)?;
     log::info!("{}: download ready ({}), running installer...", app.name, file.display());
     // Past this point the install can't be interrupted halfway.
@@ -107,8 +117,7 @@ pub fn install_at(
             // An update lands in the same Windows Installer context as the copy being replaced:
             // per-machine needs elevation, per-user must not duplicate itself per-machine. A
             // fresh install passes no context and takes the package's own default.
-            let scope = existing.and_then(|inst| inst.package.as_deref()).and_then(crate::detect::windows::msi_scope);
-            windows::run_msi(&file, destination.as_deref(), scope, job.stop, &mut *job.phase).map(|_| None)
+            windows::run_msi(&file, destination.as_deref(), msi_scope, job.stop, &mut *job.phase).map(|_| None)
         }
         #[cfg(windows)]
         PackageKind::PortableZip => {
