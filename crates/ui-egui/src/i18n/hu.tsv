@@ -384,5 +384,5 @@ filter	Installed	Telepítve
 column	Version	Verzió
 
 	Quick Launch	Gyorsindítás
-	Add to Quick Launch	Hozzáadás a gyorsindításhoz
-	Remove from Quick Launch	Eltávolítás a gyorsindításból
+	Add {app} to Quick Launch	{app} hozzáadása a gyorsindításhoz
+	Remove {app} from Quick Launch	{app} eltávolítása a gyorsindításból

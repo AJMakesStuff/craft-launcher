@@ -383,5 +383,5 @@ filter	Installed	Installiert
 column	Version	Version
 
 	Quick Launch	Schnellstart
-	Add to Quick Launch	Zum Schnellstart hinzufügen
-	Remove from Quick Launch	Aus Schnellstart entfernen
+	Add {app} to Quick Launch	{app} zum Schnellstart hinzufügen
+	Remove {app} from Quick Launch	{app} aus Schnellstart entfernen

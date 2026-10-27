@@ -1,6 +1,7 @@
 //! The header, toolbar, footer, the grid of cards and the table, laid out like the apps page on
 //! getartcraft.com: hairline cells, mono labels and square controls.
 
+use artcraft_launcher_core::CraftApp;
 use artcraft_launcher_core::details::AppDetails;
 use artcraft_launcher_core::platform::pick_asset;
 use artcraft_launcher_core::protocol::{Command, JobPhase};
@@ -63,15 +64,19 @@ const CARD_PAD: f32 = 20.0;
 const TRAFFIC_LIGHTS_W: f32 = 72.0;
 
 impl LauncherUi {
-    fn pin_button(&mut self, ui: &mut Ui, id: &str) {
-        self.pin_button_with_offset(ui, id, egui::Vec2::ZERO);
+    fn pin_button(&mut self, ui: &mut Ui, app: &'static CraftApp) {
+        self.pin_button_with_offset(ui, app, egui::Vec2::ZERO);
     }
 
-    fn pin_button_with_offset(&mut self, ui: &mut Ui, id: &str, offset: egui::Vec2) {
-        let pinned = self.settings.pinned.contains(id);
-        let label = if pinned { tl!("Remove from Quick Launch") } else { tl!("Add to Quick Launch") };
-        if widgets::glyph_button_with_offset(ui, widgets::Glyph::Star(pinned), label, offset).clicked() {
-            self.toggle_pin(id);
+    fn pin_button_with_offset(&mut self, ui: &mut Ui, app: &'static CraftApp, offset: egui::Vec2) {
+        let pinned = self.settings.pinned.contains(app.id);
+        let label = if pinned {
+            fmt(tl!("Remove {app} from Quick Launch"), &[("app", app.name)])
+        } else {
+            fmt(tl!("Add {app} to Quick Launch"), &[("app", app.name)])
+        };
+        if widgets::glyph_button_with_offset(ui, widgets::Glyph::Star(pinned), &label, offset).clicked() {
+            self.toggle_pin(app.id);
         }
     }
 
@@ -90,7 +95,7 @@ impl LauncherUi {
                     ui.push_id(entry.app.id, |ui| {
                         egui::Frame::new().stroke(t.hairline()).inner_margin(8).show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                self.pin_button(ui, entry.app.id);
+                                self.pin_button(ui, entry.app);
                                 let status = entry.status(self.platform, self.caps.manage_apps);
                                 let installed = status.is_installed();
                                 if let Some(icon) = crate::icons::app_image(ui.ctx(), entry.app.id, installed) {
@@ -538,7 +543,7 @@ impl LauncherUi {
             }
             strip_ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 16.0;
-                self.pin_button_with_offset(ui, id, vec2(4.0, 0.0));
+                self.pin_button_with_offset(ui, app, vec2(4.0, 0.0));
                 widgets::hud_link(ui, tl!("GitHub"), &app.repo_url());
             });
         }
@@ -747,7 +752,7 @@ impl LauncherUi {
                 row.col(|ui| self.table_version_cell(ui, &entry, &status, t));
                 row.col(|ui| self.table_released_cell(ui, &entry, now, t));
                 row.col(|ui| {
-                    self.pin_button(ui, id);
+                    self.pin_button(ui, entry.app);
                     self.actions(ui, &entry, &status, 168.0);
                 });
             });

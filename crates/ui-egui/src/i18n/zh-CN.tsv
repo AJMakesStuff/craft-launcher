@@ -351,5 +351,5 @@ figcraft	Interface design and prototyping	界面设计与原型制作
 column	Version	版本
 
 	Quick Launch	快速启动
-	Add to Quick Launch	添加到快速启动
-	Remove from Quick Launch	从快速启动移除
+	Add {app} to Quick Launch	将{app}添加到快速启动
+	Remove {app} from Quick Launch	从快速启动中移除{app}

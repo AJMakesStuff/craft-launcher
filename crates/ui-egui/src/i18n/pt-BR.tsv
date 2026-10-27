@@ -371,5 +371,5 @@ filter	Installed	Instalados
 column	Version	Versão
 
 	Quick Launch	Inicialização rápida
-	Add to Quick Launch	Adicionar à Inicialização rápida
-	Remove from Quick Launch	Remover da Inicialização rápida
+	Add {app} to Quick Launch	Adicionar {app} à Inicialização rápida
+	Remove {app} from Quick Launch	Remover {app} da Inicialização rápida

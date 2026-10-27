@@ -385,5 +385,5 @@ filter	Installed	Zainstalowane
 column	Version	Wersja
 
 	Quick Launch	Szybkie uruchamianie
-	Add to Quick Launch	Dodaj do szybkiego uruchamiania
-	Remove from Quick Launch	Usuń z szybkiego uruchamiania
+	Add {app} to Quick Launch	Dodaj {app} do szybkiego uruchamiania
+	Remove {app} from Quick Launch	Usuń {app} z szybkiego uruchamiania

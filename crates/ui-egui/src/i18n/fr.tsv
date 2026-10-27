@@ -381,5 +381,5 @@ filter	Installed	Installées
 column	Version	Version
 
 	Quick Launch	Lancement rapide
-	Add to Quick Launch	Ajouter au lancement rapide
-	Remove from Quick Launch	Retirer du lancement rapide
+	Add {app} to Quick Launch	Ajouter {app} au lancement rapide
+	Remove {app} from Quick Launch	Retirer {app} du lancement rapide

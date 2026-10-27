@@ -351,5 +351,5 @@ filter	Installed	Nainstalováno
 column	Version	Verze
 
 	Quick Launch	Rychlé spuštění
-	Add to Quick Launch	Přidat do rychlého spuštění
-	Remove from Quick Launch	Odebrat z rychlého spuštění
+	Add {app} to Quick Launch	Přidat {app} do rychlého spuštění
+	Remove {app} from Quick Launch	Odebrat {app} z rychlého spuštění

@@ -379,5 +379,5 @@ filter	Installed	Установлены
 column	Version	Версия
 
 	Quick Launch	Быстрый запуск
-	Add to Quick Launch	Добавить в быстрый запуск
-	Remove from Quick Launch	Убрать из быстрого запуска
+	Add {app} to Quick Launch	Добавить {app} в быстрый запуск
+	Remove {app} from Quick Launch	Убрать {app} из быстрого запуска
