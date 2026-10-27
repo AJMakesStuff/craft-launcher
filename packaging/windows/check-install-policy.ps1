@@ -70,6 +70,13 @@ try {
         throw 'Launcher registration or shortcut preference changed unexpectedly.'
       }
     }
+    # Silent and reduced-UI updates never show the wizard, so the folder must also be restored in the execute sequence.
+    $execute = @{}
+    foreach ($row in (Read-Rows $database 'SELECT `Action`, `Sequence` FROM `InstallExecuteSequence`' 2)) { $execute[$row[0]] = [int]$row[1] }
+    if (-not ($execute.ContainsKey('CraftRestoreLauncherFolder') -and $execute['AppSearch'] -lt $execute['CraftRestoreLauncherFolder'] -and
+        $execute['CraftRestoreLauncherFolder'] -lt $execute['CostInitialize'])) {
+      throw 'Silent updates must restore the launcher folder after AppSearch and before directory costing.'
+    }
     Write-Output 'PASS ArtCraft Launcher: per-user scope, suite folder, remembered/custom paths and existing registration. No installation performed.'
     return
   }

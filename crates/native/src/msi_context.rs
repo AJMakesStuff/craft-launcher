@@ -47,6 +47,14 @@ pub(crate) fn update_scope(
     }
 }
 
+/// The one context every uninstall record of a product agrees on. Records that disagree (the copy is
+/// registered for this account and for everyone) or no records at all give `None`, so the update stops.
+pub(crate) fn single_scope(scopes: impl IntoIterator<Item = MsiScope>) -> Option<MsiScope> {
+    let mut scopes = scopes.into_iter();
+    let first = scopes.next()?;
+    scopes.all(|scope| scope == first).then_some(first)
+}
+
 /// The context for a fresh install. A package that defaults to per-user cannot write to a folder this
 /// account has no write access to (a custom folder under Program Files), so that install is machine-wide
 /// and Windows asks for permission. Any other fresh install takes the package's own default.
@@ -215,6 +223,15 @@ mod tests {
     fn a_blocked_lookup_without_a_record_stops_the_update() {
         let result = update_scope(true, Some(CODE), |_| Err(ProbeError::Unavailable("timed out".into())), |_| None);
         assert_eq!(result, Err(UNKNOWN_CONTEXT.to_string()));
+    }
+
+    #[test]
+    fn records_in_two_contexts_give_no_fallback_scope() {
+        assert_eq!(single_scope([]), None);
+        assert_eq!(single_scope([MsiScope::PerUser]), Some(MsiScope::PerUser));
+        assert_eq!(single_scope([MsiScope::PerMachine, MsiScope::PerMachine]), Some(MsiScope::PerMachine));
+        assert_eq!(single_scope([MsiScope::PerMachine, MsiScope::PerUser]), None);
+        assert_eq!(single_scope([MsiScope::PerUser, MsiScope::PerMachine, MsiScope::PerMachine]), None);
     }
 
     #[test]
