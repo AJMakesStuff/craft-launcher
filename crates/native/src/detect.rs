@@ -100,7 +100,8 @@ fn is_installer_entry(app: &CraftApp, display_name: &str, publisher: &str) -> bo
 }
 
 /// Where a Windows install of `app` may keep its exe, in the order to try: the entry's
-/// `InstallLocation`, then `<App>` under each Program Files root for each name the app has had,
+/// `InstallLocation`, then `<App>` under each install root (the `ArtCraft` suite folder first, then the
+/// root itself, for Program Files and the per-user Programs folder) for each name the app has had,
 /// and in each folder `<stem>.exe` for each stem, current first. Doesn't touch the disk.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn exe_candidates(app: &CraftApp, location: Option<&Path>, program_files: &[PathBuf]) -> Vec<PathBuf> {
@@ -251,7 +252,7 @@ pub mod windows {
     }
 
     /// The app's exe: from `App Paths` (per-machine under HKLM, per-user under HKCU), the install
-    /// folder, or Program Files.
+    /// folder, or the `ArtCraft` suite folder under Program Files and the per-user Programs folder.
     fn exe_path(app: &CraftApp, location: Option<PathBuf>) -> Option<PathBuf> {
         for stem in app.stems() {
             let app_paths = format!(r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{stem}.exe");
@@ -279,7 +280,10 @@ pub mod windows {
                 roots.push(programs);
             }
         }
-        exe_candidates(app, location.as_deref(), &roots).into_iter().find(|p| p.exists())
+        // The suite folder is where current packages install; the bare roots cover older installs.
+        let mut candidates: Vec<PathBuf> = roots.iter().map(|root| root.join("ArtCraft")).collect();
+        candidates.extend(roots);
+        exe_candidates(app, location.as_deref(), &candidates).into_iter().find(|p| p.exists())
     }
 
     pub fn detect(app: &CraftApp) -> Option<Installed> {

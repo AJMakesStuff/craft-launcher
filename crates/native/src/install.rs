@@ -3,7 +3,9 @@
 //! Apps go where their platform keeps applications, installed the platform's own way:
 //!
 //! - macOS: the signed `.app` from the release DMG into `/Applications`.
-//! - Windows: the release MSI (Windows Installer) into `C:\Program Files\<App>`.
+//! - Windows: the release MSI (Windows Installer), for the current user into
+//!   `%LOCALAPPDATA%\Programs\ArtCraft\<App>` by default. An update keeps the installed copy's folder
+//!   and scope (per-machine copies stay in `C:\Program Files\ArtCraft\<App>`).
 //! - Linux: the distro's own package (`.deb` through apt on the Debian family, `.rpm` through
 //!   dnf/zypper/rpm on the Fedora, Red Hat and SUSE families, read from `os-release`) with the
 //!   system's polkit password prompt; otherwise a Flatpak, otherwise an AppImage in
