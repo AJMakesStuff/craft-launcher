@@ -94,11 +94,14 @@ pub fn install_at(
     log::info!("{}: starting {} to {} ({})", app.name, if existing.is_some() { "update" } else { "install" }, release.version_label(), kind.label());
     #[cfg(windows)]
     let msi_scope = if kind == PackageKind::Msi {
-        crate::msi_context::update_scope(
+        let updated = crate::msi_context::update_scope(
             existing.is_some_and(|inst| inst.source == InstallSource::Msi),
             existing.and_then(|inst| inst.package.as_deref()),
             crate::msi_context::probe,
-        )?
+            |code| crate::detect::windows::record_scope(app, code),
+        )?;
+        // A fresh install keeps the package's own default unless the chosen folder needs administrator rights.
+        updated.or_else(|| if existing.is_none() { crate::msi_context::fresh_scope(destination.as_deref(), can_create_files_in) } else { None })
     } else {
         None
     };
@@ -277,16 +280,27 @@ fn selected_folder(folder: &str, writable: bool) -> Result<PathBuf, String> {
         return Err(invalid("the folder is unavailable. Create it or reconnect its drive first"));
     }
     if writable {
-        let probe = path.join(format!(
-            ".artcraft-launcher-write-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
-        ));
-        let output = std::fs::OpenOptions::new().write(true).create_new(true).open(&probe).map_err(|e| invalid(&e.to_string()))?;
-        drop(output);
-        std::fs::remove_file(&probe).map_err(|e| invalid(&e.to_string()))?;
+        write_probe(&path).map_err(|e| invalid(&e.to_string()))?;
     }
     Ok(path)
+}
+
+/// Creates and removes a scratch file in `dir`, the way a real write would be refused.
+fn write_probe(dir: &Path) -> std::io::Result<()> {
+    let probe = dir.join(format!(
+        ".artcraft-launcher-write-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
+    ));
+    drop(std::fs::OpenOptions::new().write(true).create_new(true).open(&probe)?);
+    std::fs::remove_file(&probe)
+}
+
+/// Whether this account can create files where `path` goes: `path` itself, or the nearest folder above it
+/// that exists (an install folder is created by the installer).
+#[cfg(windows)]
+fn can_create_files_in(path: &Path) -> bool {
+    path.ancestors().find(|folder| folder.is_dir()).is_some_and(|folder| write_probe(folder).is_ok())
 }
 
 #[cfg(any(windows, test))]

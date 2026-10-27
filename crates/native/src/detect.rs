@@ -209,6 +209,14 @@ pub mod windows {
         pub product_code: String,
         pub version: Option<artcraft_launcher_core::version::Version>,
         pub exe: Option<PathBuf>,
+        /// The context of the uninstall record that named it: the machine's records are per-machine,
+        /// the current account's own are per-user.
+        pub scope: crate::install::MsiScope,
+    }
+
+    /// The context `product_code`'s uninstall record places it in, when Windows Installer cannot be asked.
+    pub fn record_scope(app: &CraftApp, product_code: &str) -> Option<crate::install::MsiScope> {
+        msi_installs(app).into_iter().find(|m| m.product_code.eq_ignore_ascii_case(product_code)).map(|m| m.scope)
     }
 
     /// Every Windows Installer entry for `app`, newest first.
@@ -231,7 +239,8 @@ pub mod windows {
                 let location: String = key.get_value("InstallLocation").unwrap_or_default();
                 let exe =
                     exe_path(app, (!location.is_empty()).then(|| PathBuf::from(location)).or_else(|| install_dir(app, hive, flags)), hive, flags);
-                out.push(MsiInstall { product_code: code, version, exe });
+                let scope = if hive == HKEY_CURRENT_USER { crate::install::MsiScope::PerUser } else { crate::install::MsiScope::PerMachine };
+                out.push(MsiInstall { product_code: code, version, exe, scope });
             }
         }
         out.sort_by(|a, b| match (&b.version, &a.version) {
