@@ -229,7 +229,8 @@ pub mod windows {
                 }
                 let version = key.get_value::<String, _>("DisplayVersion").ok().and_then(|v| version::parse(&v));
                 let location: String = key.get_value("InstallLocation").unwrap_or_default();
-                let exe = exe_path(app, (!location.is_empty()).then(|| PathBuf::from(location)).or_else(|| install_dir(app, hive, flags)));
+                let exe =
+                    exe_path(app, (!location.is_empty()).then(|| PathBuf::from(location)).or_else(|| install_dir(app, hive, flags)), hive, flags);
                 out.push(MsiInstall { product_code: code, version, exe });
             }
         }
@@ -251,39 +252,42 @@ pub mod windows {
         (!dir.is_empty()).then(|| PathBuf::from(dir))
     }
 
-    /// The app's exe: from `App Paths` (per-machine under HKLM, per-user under HKCU), the install
-    /// folder, or the `ArtCraft` suite folder under Program Files and the per-user Programs folder.
-    fn exe_path(app: &CraftApp, location: Option<PathBuf>) -> Option<PathBuf> {
+    /// The app's exe for one uninstall record, found only in that record's own scope: the recorded
+    /// folder first, then `App Paths` in the record's hive and registry view, then the usual folders
+    /// for that scope (`ArtCraft` suite folder first, then the bare root, for older installs). A
+    /// per-machine entry therefore never stands in for a per-user record, or the other way round.
+    fn exe_path(app: &CraftApp, location: Option<PathBuf>, hive: HKEY, flags: u32) -> Option<PathBuf> {
+        if let Some(found) = exe_candidates(app, location.as_deref(), &[]).into_iter().find(|p| p.exists()) {
+            return Some(found);
+        }
         for stem in app.stems() {
             let app_paths = format!(r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{stem}.exe");
-            for (hive, flags) in [(HKEY_LOCAL_MACHINE, KEY_WOW64_64KEY), (HKEY_LOCAL_MACHINE, KEY_WOW64_32KEY), (HKEY_CURRENT_USER, 0)] {
-                if let Ok(key) = RegKey::predef(hive).open_subkey_with_flags(&app_paths, KEY_READ | flags)
-                    && let Ok(path) = key.get_value::<String, _>("")
-                {
-                    let p = PathBuf::from(path.trim_matches('"'));
-                    if p.exists() {
-                        return Some(p);
-                    }
+            if let Ok(key) = RegKey::predef(hive).open_subkey_with_flags(&app_paths, KEY_READ | flags)
+                && let Ok(path) = key.get_value::<String, _>("")
+            {
+                let p = PathBuf::from(path.trim_matches('"'));
+                if p.exists() {
+                    return Some(p);
                 }
             }
         }
-        let mut roots = Vec::new();
-        for var in ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"] {
-            if let Some(pf) = std::env::var_os(var) {
-                roots.push(PathBuf::from(pf));
+        let roots: Vec<PathBuf> = if hive == HKEY_CURRENT_USER {
+            // Per-user installs (dual-scope packages) live in the user's own Programs folder.
+            std::env::var_os("LOCALAPPDATA").map(|local| PathBuf::from(local).join("Programs")).into_iter().collect()
+        } else {
+            let mut roots: Vec<PathBuf> = Vec::new();
+            for var in ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"] {
+                if let Some(pf) = std::env::var_os(var).map(PathBuf::from)
+                    && !roots.contains(&pf)
+                {
+                    roots.push(pf);
+                }
             }
-        }
-        // Per-user installs (dual-scope packages) live in the user's own Programs folder.
-        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-            let programs = PathBuf::from(local).join("Programs");
-            if !roots.contains(&programs) {
-                roots.push(programs);
-            }
-        }
-        // The suite folder is where current packages install; the bare roots cover older installs.
+            roots
+        };
         let mut candidates: Vec<PathBuf> = roots.iter().map(|root| root.join("ArtCraft")).collect();
         candidates.extend(roots);
-        exe_candidates(app, location.as_deref(), &candidates).into_iter().find(|p| p.exists())
+        exe_candidates(app, None, &candidates).into_iter().find(|p| p.exists())
     }
 
     pub fn detect(app: &CraftApp) -> Option<Installed> {
