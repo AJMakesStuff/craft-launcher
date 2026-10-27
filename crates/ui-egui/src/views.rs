@@ -263,7 +263,7 @@ impl LauncherUi {
     /// The grid's sort combo box. It writes the chosen key and direction directly (not through the
     /// action queue) and carries an accessible "Sort" name.
     fn sort_picker(&mut self, ui: &mut Ui) {
-        egui::ComboBox::from_id_salt("sort")
+        craft_ui::ComboBox::from_id_salt("sort")
             .selected_text(RichText::new(grid_sort_label(grid_sort_now(&self.settings))).size(13.0))
             .width(190.0)
             .show_ui(ui, |ui| {
