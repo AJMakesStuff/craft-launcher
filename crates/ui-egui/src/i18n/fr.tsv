@@ -379,3 +379,7 @@ filter	Installed	Installées
 	Show {n} more changes	Afficher {n} modifications de plus
 	Last updated: {date}	Dernière mise à jour : {date}
 column	Version	Version
+
+	Quick Launch	Lancement rapide
+	Add to Quick Launch	Ajouter au lancement rapide
+	Remove from Quick Launch	Retirer du lancement rapide

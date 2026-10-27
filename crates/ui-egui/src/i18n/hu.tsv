@@ -382,3 +382,7 @@ filter	Installed	Telepítve
 	Show {n} more changes	{n} további változás megjelenítése
 	Last updated: {date}	Utoljára frissítve: {date}
 column	Version	Verzió
+
+	Quick Launch	Gyorsindítás
+	Add to Quick Launch	Hozzáadás a gyorsindításhoz
+	Remove from Quick Launch	Eltávolítás a gyorsindításból

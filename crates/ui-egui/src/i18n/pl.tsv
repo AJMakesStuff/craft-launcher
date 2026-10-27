@@ -383,3 +383,7 @@ filter	Installed	Zainstalowane
 	Show {n} more changes	Pokaż {n} więcej zmian
 	Last updated: {date}	Ostatnia aktualizacja: {date}
 column	Version	Wersja
+
+	Quick Launch	Szybkie uruchamianie
+	Add to Quick Launch	Dodaj do szybkiego uruchamiania
+	Remove from Quick Launch	Usuń z szybkiego uruchamiania

@@ -381,3 +381,7 @@ filter	Installed	Installiert
 	Show {n} more changes	{n} weitere Änderungen anzeigen
 	Last updated: {date}	Zuletzt aktualisiert: {date}
 column	Version	Version
+
+	Quick Launch	Schnellstart
+	Add to Quick Launch	Zum Schnellstart hinzufügen
+	Remove from Quick Launch	Aus Schnellstart entfernen
