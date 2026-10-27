@@ -177,8 +177,8 @@ pub mod macos {
 pub mod windows {
     use std::path::PathBuf;
 
-    use winreg::RegKey;
     use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
+    use winreg::{HKEY, RegKey};
 
     use super::{CraftApp, InstallSource, Installed, exe_candidates, is_installer_entry, version};
 
@@ -228,7 +228,7 @@ pub mod windows {
                 }
                 let version = key.get_value::<String, _>("DisplayVersion").ok().and_then(|v| version::parse(&v));
                 let location: String = key.get_value("InstallLocation").unwrap_or_default();
-                let exe = exe_path(app, (!location.is_empty()).then(|| PathBuf::from(location)).or_else(|| install_dir(app)));
+                let exe = exe_path(app, (!location.is_empty()).then(|| PathBuf::from(location)).or_else(|| install_dir(app, hive, flags)));
                 out.push(MsiInstall { product_code: code, version, exe });
             }
         }
@@ -241,19 +241,13 @@ pub mod windows {
         out
     }
 
-    /// The folder the app's MSI remembers for its next upgrade, which is where it went when the
-    /// launcher chose the folder. Per-machine installs record it under HKLM, per-user installs
-    /// (dual-scope packages) under HKCU.
-    fn install_dir(app: &CraftApp) -> Option<PathBuf> {
-        for (hive, flags) in [(HKEY_LOCAL_MACHINE, KEY_WOW64_64KEY), (HKEY_LOCAL_MACHINE, KEY_WOW64_32KEY), (HKEY_CURRENT_USER, 0)] {
-            if let Ok(key) = RegKey::predef(hive).open_subkey_with_flags(format!(r"SOFTWARE\{}", app.name), KEY_READ | flags)
-                && let Ok(dir) = key.get_value::<String, _>("InstallDir")
-                && !dir.is_empty()
-            {
-                return Some(PathBuf::from(dir));
-            }
-        }
-        None
+    /// The folder the app's MSI remembers for its next upgrade, read from the same registry view as the
+    /// uninstall record that named the install. A per-machine record (HKLM) therefore reads HKLM, and a
+    /// per-user record (HKCU, dual-scope packages) reads HKCU, so one scope never resolves to the other's folder.
+    fn install_dir(app: &CraftApp, hive: HKEY, flags: u32) -> Option<PathBuf> {
+        let key = RegKey::predef(hive).open_subkey_with_flags(format!(r"SOFTWARE\{}", app.name), KEY_READ | flags).ok()?;
+        let dir = key.get_value::<String, _>("InstallDir").ok()?;
+        (!dir.is_empty()).then(|| PathBuf::from(dir))
     }
 
     /// The app's exe: from `App Paths` (per-machine under HKLM, per-user under HKCU), the install
